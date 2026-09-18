@@ -4,6 +4,11 @@ import Security
 
 // MARK: - FCM/GCM registration
 
+struct PushBootstrapIdentity: Codable, Sendable {
+    let androidID: String
+    let securityToken: String
+}
+
 enum PushRegistrationService {
     static let projectID = "google.com:api-project-289722593072"
     static let appID = "1:289722593072:android:3cfcf5bc359f0308"
@@ -12,37 +17,69 @@ enum PushRegistrationService {
     static let certificateSHA1 = AndroidAuthService.clientSignature
     static let gcmServerKey = "BDOU99-h67HcA6JeFXHbSNMu7e2yNNu3RzoMj8TM4W88jITfq7ZmPvIM1Iv-4_l2LxQcYwhqby2xGpWwzjfAnG4"
 
-    static func register() async throws -> PushCredentials {
+    static func bootstrapIdentity() async throws -> PushBootstrapIdentity {
         let checkin = try await gcmCheckin()
+        return PushBootstrapIdentity(
+            androidID: checkin.androidID,
+            securityToken: checkin.securityToken
+        )
+    }
+
+    static func register() async throws -> PushCredentials {
+        try await register(
+            identity: bootstrapIdentity()
+        )
+    }
+
+    private static func register(
+        identity: async throws -> PushBootstrapIdentity
+    ) async throws -> PushCredentials {
+        try await register(identity: identity())
+    }
+
+    static func register(
+        identity: PushBootstrapIdentity
+    ) async throws -> PushCredentials {
         let appID = "wp:\(package)#\(UUID().uuidString)"
-        let gcmToken = try await gcmRegister(androidID: checkin.androidID, securityToken: checkin.securityToken, appID: appID)
+        let gcmToken = try await gcmRegister(
+            androidID: identity.androidID,
+            securityToken: identity.securityToken,
+            appID: appID
+        )
         let installation = try await firebaseInstall()
 
         let privateKey = P256.KeyAgreement.PrivateKey()
         let publicKey = privateKey.publicKey.x963Representation
         var random = [UInt8](repeating: 0, count: 16)
-        guard SecRandomCopyBytes(kSecRandomDefault, random.count, &random) == errSecSuccess else { throw FindHubError.crypto("Random generation failed") }
+        guard SecRandomCopyBytes(kSecRandomDefault, random.count, &random) == errSecSuccess else {
+            throw FindHubError.crypto("Random generation failed")
+        }
         let authSecret = Data(random)
 
-        let registration = try await firebaseRegister(gcmToken: gcmToken,
-                                                      installationToken: installation.token,
-                                                      publicKey: publicKey,
-                                                      authSecret: authSecret)
-        return PushCredentials(androidID: checkin.androidID,
-                               securityToken: checkin.securityToken,
-                               gcmAppID: appID,
-                               gcmToken: gcmToken,
-                               installationToken: installation.token,
-                               installationRefreshToken: installation.refreshToken,
-                               fid: installation.fid,
-                               registrationToken: registration,
-                               privateKeyRaw: privateKey.rawRepresentation,
-                               publicKeyX963: publicKey,
-                               authSecret: authSecret)
+        let registration = try await firebaseRegister(
+            gcmToken: gcmToken,
+            installationToken: installation.token,
+            publicKey: publicKey,
+            authSecret: authSecret
+        )
+
+        return PushCredentials(
+            androidID: identity.androidID,
+            securityToken: identity.securityToken,
+            gcmAppID: appID,
+            gcmToken: gcmToken,
+            installationToken: installation.token,
+            installationRefreshToken: installation.refreshToken,
+            fid: installation.fid,
+            registrationToken: registration,
+            privateKeyRaw: privateKey.rawRepresentation,
+            publicKeyX963: publicKey,
+            authSecret: authSecret
+        )
     }
 
     private static func gcmCheckin() async throws -> (androidID: String, securityToken: String) {
-        var chrome = ProtoWriter(); chrome.varint(1, 3); chrome.string(2, "131.0.0.0"); chrome.varint(3, 1)
+        var chrome = ProtoWriter(); chrome.varint(1, 3); chrome.string(2, "94.0.4606.51"); chrome.varint(3, 1)
         var checkin = ProtoWriter(); checkin.varint(12, 3); checkin.bytes(13, chrome.data)
         var reqProto = ProtoWriter(); reqProto.bytes(4, checkin.data); reqProto.varint(14, 3); reqProto.varint(22, 0)
 
@@ -56,21 +93,98 @@ enum PushRegistrationService {
         return (String(android), String(sec))
     }
 
-    private static func gcmRegister(androidID: String, securityToken: String, appID: String) async throws -> String {
+    private static func gcmRegister(
+        androidID: String,
+        securityToken: String,
+        appID: String
+    ) async throws -> String {
         let body = formEncoded([
             "app": "org.chromium.linux",
             "X-subtype": appID,
             "device": androidID,
             "sender": gcmServerKey
         ])
-        var req = URLRequest(url: URL(string: "https://android.clients.google.com/c2dm/register3")!)
-        req.httpMethod = "POST"; req.httpBody = body; req.timeoutInterval = 30
-        req.setValue("AidLogin \(androidID):\(securityToken)", forHTTPHeaderField: "Authorization")
-        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await URLSession.shared.data(for: req)
-        let text = String(decoding: data, as: UTF8.self)
-        guard (response as? HTTPURLResponse)?.statusCode == 200, text.hasPrefix("token=") else { throw FindHubError.network("GCM registration failed: \(text)") }
-        return String(text.dropFirst(6))
+
+        var lastError = "Unknown GCM registration error"
+
+        // Current GoogleFindMyTools treats PHONE_REGISTRATION_ERROR as
+        // transient. Google can return it for several consecutive requests
+        // before accepting the same Android/GCM identity.
+        for attempt in 1...20 {
+            var req = URLRequest(
+                url: URL(
+                    string:
+                        "https://android.clients.google.com/c2dm/register3"
+                )!
+            )
+            req.httpMethod = "POST"
+            req.httpBody = body
+            req.timeoutInterval = 30
+            req.setValue(
+                "AidLogin \(androidID):\(securityToken)",
+                forHTTPHeaderField:
+                    "Authorization"
+            )
+            req.setValue(
+                "application/x-www-form-urlencoded",
+                forHTTPHeaderField:
+                    "Content-Type"
+            )
+
+            do {
+                let (data, response) =
+                    try await URLSession.shared.data(
+                        for: req
+                    )
+                let text =
+                    String(
+                        decoding: data,
+                        as: UTF8.self
+                    )
+                    .trimmingCharacters(
+                        in:
+                            .whitespacesAndNewlines
+                    )
+
+                if (response as? HTTPURLResponse)?
+                    .statusCode == 200,
+                   text.hasPrefix("token=")
+                {
+                    return String(
+                        text.dropFirst(6)
+                    )
+                }
+
+                lastError = text.isEmpty
+                    ? "HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)"
+                    : text
+
+                let isPhoneRegistrationError =
+                    text.uppercased().contains(
+                        "PHONE_REGISTRATION_ERROR"
+                    )
+
+                guard isPhoneRegistrationError,
+                      attempt < 20 else {
+                    break
+                }
+            } catch {
+                lastError =
+                    error.localizedDescription
+
+                guard attempt < 20 else {
+                    break
+                }
+            }
+
+            try await Task.sleep(
+                for: .seconds(1)
+            )
+        }
+
+        throw FindHubError.network(
+            "GCM registration failed after retries: \(lastError)"
+        )
     }
 
     private static func firebaseInstall() async throws -> (token: String, refreshToken: String, fid: String) {
@@ -81,6 +195,13 @@ enum PushRegistrationService {
         let payload: [String: Any] = ["appId": appID, "authVersion": "FIS_v2", "fid": fid, "sdkVersion": "w:0.6.6"]
         var req = URLRequest(url: URL(string: "https://firebaseinstallations.googleapis.com/v1/projects/\(projectID)/installations")!)
         req.httpMethod = "POST"; req.httpBody = try JSONSerialization.data(withJSONObject: payload); req.timeoutInterval = 30
+        let heartbeat = Data(
+            "{\"heartbeats\":[],\"version\":2}".utf8
+        ).base64EncodedString()
+        req.setValue(
+            heartbeat,
+            forHTTPHeaderField: "x-firebase-client"
+        )
         req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         req.setValue(package, forHTTPHeaderField: "X-Android-Package")
         req.setValue(certificateSHA1, forHTTPHeaderField: "X-Android-Cert")

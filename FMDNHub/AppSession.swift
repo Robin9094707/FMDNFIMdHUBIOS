@@ -392,6 +392,72 @@ final class AppSession: ObservableObject {
         status = "Error"
     }
 
+    private func writeGeneratedSecretsFile(
+        _ value: ImportedSecrets
+    ) throws {
+        let data =
+            try SecretsImporter.export(
+                value,
+                push: pushCredentials
+            )
+
+        let directory =
+            try generatedSecretsDirectory()
+
+        let url =
+            directory
+                .appendingPathComponent(
+                    "secrets.json"
+                )
+
+        try data.write(
+            to: url,
+            options: [
+                .atomic,
+                .completeFileProtection
+            ]
+        )
+    }
+
+    private func removeGeneratedSecretsFile() {
+        guard
+            let directory =
+                try? generatedSecretsDirectory()
+        else {
+            return
+        }
+
+        try? FileManager.default.removeItem(
+            at:
+                directory.appendingPathComponent(
+                    "secrets.json"
+                )
+        )
+    }
+
+    private func generatedSecretsDirectory() throws -> URL {
+        let base =
+            try FileManager.default.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+
+        let directory =
+            base.appendingPathComponent(
+                "FindHub",
+                isDirectory: true
+            )
+
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+
+        return directory
+    }
+
     private func exportFile(name: String, data: Data) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("FindHubExports", isDirectory: true)

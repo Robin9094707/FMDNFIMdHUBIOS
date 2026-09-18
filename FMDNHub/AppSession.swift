@@ -34,6 +34,11 @@ final class AppSession: ObservableObject {
         devices.filter { !hiddenIDs.contains($0.id) }
     }
 
+    var googleSetupAndroidID: String? {
+        pushCredentials?.androidID
+            ?? pushBootstrap?.androidID
+    }
+
     var hiddenDevices: [TrackerDevice] {
         devices.filter { hiddenIDs.contains($0.id) }
     }

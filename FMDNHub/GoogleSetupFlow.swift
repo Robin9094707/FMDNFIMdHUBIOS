@@ -4,12 +4,18 @@ import WebKit
 // MARK: - Google EmbeddedSetup
 
 struct GoogleLoginSheet: View {
+    let androidID: String
+    let onDebug: (String) -> Void
     let onToken: (String) -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            GoogleEmbeddedSetupWebView(onToken: onToken)
+            GoogleEmbeddedSetupWebView(
+                androidID: androidID,
+                onDebug: onDebug,
+                onToken: onToken
+            )
                 .ignoresSafeArea(edges: .bottom)
                 .navigationTitle("Google sign in")
                 .navigationBarTitleDisplayMode(.inline)
@@ -25,17 +31,105 @@ struct GoogleLoginSheet: View {
 }
 
 struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
+    let androidID: String
+    let onDebug: (String) -> Void
     let onToken: (String) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onToken: onToken)
+        Coordinator(
+            androidID: androidID,
+            onDebug: onDebug,
+            onToken: onToken
+        )
     }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.applicationNameForUserAgent = "MinuteMaid"
+
+        let androidHex =
+            UInt64(androidID)
+                .map { String($0, radix: 16) }
+            ?? androidID
+
+        let setupBridge = """
+        (() => {
+          const noop = function() {};
+          const mm = {
+            addAccount: noop,
+            attemptLogin: noop,
+            backupSyncOptIn: noop,
+            cancelFido2SignRequest: noop,
+            clearOldLoginAttempts: noop,
+            closeView: noop,
+            fetchIIDToken: noop,
+            fetchVerifiedPhoneNumber: function() { return null; },
+            getAccounts: function() { return "[]"; },
+            getAllowedDomains: function() { return "[]"; },
+            getAndroidId: function() { return "(androidHex)"; },
+            getAuthModuleVersionCode: function() { return 244433022; },
+            getBuildVersionSdk: function() { return 35; },
+            getDeviceContactsCount: function() { return -1; },
+            getDeviceDataVersionInfo: function() { return 1; },
+            getDroidGuardResult: noop,
+            getFactoryResetChallenges: function() { return "[]"; },
+            getPhoneNumber: function() { return null; },
+            getPlayServicesVersionCode: function() { return 244433022; },
+            getSimSerial: function() { return null; },
+            getSimState: function() { return 0; },
+            goBack: noop,
+            hasPhoneNumber: function() { return false; },
+            hasTelephony: function() { return false; },
+            hideKeyboard: noop,
+            isUserOwner: function() { return true; },
+            launchEmergencyDialer: noop,
+            log: noop,
+            notifyOnTermsOfServiceAccepted: noop,
+            sendFido2SkUiEvent: noop,
+            setAccountIdentifier: noop,
+            setAllActionsEnabled: noop,
+            setBackButtonEnabled: noop,
+            setNewAccountCreated: noop,
+            setPrimaryActionEnabled: noop,
+            setPrimaryActionLabel: noop,
+            setSecondaryActionEnabled: noop,
+            setSecondaryActionLabel: noop,
+            showKeyboard: noop,
+            showView: noop,
+            skipLogin: noop,
+            startAfw: noop,
+            startFido2SignRequest: noop
+          };
+
+          if (!window.mm) {
+            Object.defineProperty(window, "mm", {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: mm
+            });
+          } else {
+            Object.keys(mm).forEach((key) => {
+              if (typeof window.mm[key] === "undefined") {
+                window.mm[key] = mm[key];
+              }
+            });
+          }
+        })();
+        """
+
+        let controller = WKUserContentController()
+        controller.addUserScript(
+            WKUserScript(
+                source: setupBridge,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
+            )
+        )
+        configuration.userContentController = controller
 
         let webView = WKWebView(
             frame: .zero,
@@ -85,7 +179,7 @@ struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
             ),
             URLQueryItem(
                 name: "xoauth_display_name",
-                value: "Find Hub"
+                value: "Android Device"
             ),
             URLQueryItem(
                 name: "lang",
@@ -94,6 +188,12 @@ struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
             URLQueryItem(
                 name: "cc",
                 value: region
+            ),
+            URLQueryItem(
+                name: "langCountry",
+                value:
+                    Locale.current.identifier
+                        .lowercased()
             ),
             URLQueryItem(
                 name: "hl",
@@ -128,13 +228,35 @@ struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
         WKNavigationDelegate,
         WKUIDelegate
     {
+        let androidID: String
+        let onDebug: (String) -> Void
         let onToken: (String) -> Void
         weak var webView: WKWebView?
         private var timer: Timer?
         private var completed = false
 
-        init(onToken: @escaping (String) -> Void) {
+        init(
+            androidID: String,
+            onDebug: @escaping (String) -> Void,
+            onToken: @escaping (String) -> Void
+        ) {
+            self.androidID = androidID
+            self.onDebug = onDebug
             self.onToken = onToken
+        }
+
+        private func log(_ message: String) {
+            DispatchQueue.main.async {
+                self.onDebug(message)
+            }
+        }
+
+        private func safeDescription(_ url: URL?) -> String {
+            guard let url else {
+                return "(no URL)"
+            }
+
+            return "(url.host ?? "?")(url.path)"
         }
 
         func beginFreshSetup(
@@ -156,24 +278,13 @@ struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
                     return
                 }
 
-                let stale =
-                    cookies.filter {
-                        $0.name
-                            .lowercased()
-                            == "oauth_token"
-                    }
-
-                if stale.isEmpty {
-                    DispatchQueue.main.async {
-                        webView.load(request)
-                        self.startCookiePolling()
-                    }
-                    return
-                }
-
+                // Aurora Store clears the WebView cookie jar before
+                // EmbeddedSetup. Do the same here so Google always starts
+                // a fresh setup flow, while the resulting session remains
+                // available for the subsequent finder_hw unlock.
                 let group = DispatchGroup()
 
-                for cookie in stale {
+                for cookie in cookies {
                     group.enter()
                     cookieStore.delete(cookie) {
                         group.leave()
@@ -183,6 +294,9 @@ struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
                 group.notify(
                     queue: .main
                 ) {
+                    self.log(
+                        "Google EmbeddedSetup starting with fresh cookies"
+                    )
                     webView.load(request)
                     self.startCookiePolling()
                 }
@@ -238,9 +352,58 @@ struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
 
         func webView(
             _ webView: WKWebView,
+            didStartProvisionalNavigation navigation: WKNavigation!
+        ) {
+            log(
+                "Google login navigation started: (safeDescription(webView.url))"
+            )
+        }
+
+        func webView(
+            _ webView: WKWebView,
             didFinish navigation: WKNavigation!
         ) {
+            log(
+                "Google login navigation finished: (safeDescription(webView.url))"
+            )
             checkCookies()
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationResponse: WKNavigationResponse,
+            decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+        ) {
+            if let http =
+                navigationResponse.response
+                    as? HTTPURLResponse
+            {
+                log(
+                    "Google login HTTP (http.statusCode): (safeDescription(http.url))"
+                )
+            }
+
+            decisionHandler(.allow)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFail navigation: WKNavigation!,
+            withError error: Error
+        ) {
+            log(
+                "Google login navigation failed: (error.localizedDescription)"
+            )
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFailProvisionalNavigation navigation: WKNavigation!,
+            withError error: Error
+        ) {
+            log(
+                "Google login provisional navigation failed: (error.localizedDescription)"
+            )
         }
 
         func webView(

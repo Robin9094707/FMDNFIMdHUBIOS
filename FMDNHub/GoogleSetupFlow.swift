@@ -49,8 +49,9 @@ struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
             url: Self.embeddedSetupURL()
         )
 
-        webView.load(request)
-        context.coordinator.startCookiePolling()
+        context.coordinator.beginFreshSetup(
+            request: request
+        )
 
         return webView
     }
@@ -134,6 +135,58 @@ struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
 
         init(onToken: @escaping (String) -> Void) {
             self.onToken = onToken
+        }
+
+        func beginFreshSetup(
+            request: URLRequest
+        ) {
+            guard let webView else {
+                return
+            }
+
+            let cookieStore =
+                webView.configuration
+                    .websiteDataStore
+                    .httpCookieStore
+
+            cookieStore.getAllCookies {
+                [weak self] cookies in
+
+                guard let self else {
+                    return
+                }
+
+                let stale =
+                    cookies.filter {
+                        $0.name
+                            .lowercased()
+                            == "oauth_token"
+                    }
+
+                if stale.isEmpty {
+                    DispatchQueue.main.async {
+                        webView.load(request)
+                        self.startCookiePolling()
+                    }
+                    return
+                }
+
+                let group = DispatchGroup()
+
+                for cookie in stale {
+                    group.enter()
+                    cookieStore.delete(cookie) {
+                        group.leave()
+                    }
+                }
+
+                group.notify(
+                    queue: .main
+                ) {
+                    webView.load(request)
+                    self.startCookiePolling()
+                }
+            }
         }
 
         func startCookiePolling() {

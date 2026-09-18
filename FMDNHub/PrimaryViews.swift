@@ -204,6 +204,20 @@ struct SetupView: View {
                                         "ladybug"
                                 )
                             }
+
+                            Divider()
+
+                            Button(
+                                role: .destructive
+                            ) {
+                                session.resetPushIdentity()
+                            } label: {
+                                Label(
+                                    "Reset setup identity",
+                                    systemImage:
+                                        "arrow.counterclockwise.circle"
+                                )
+                            }
                         } label: {
                             Label(
                                 "Advanced / existing setup",

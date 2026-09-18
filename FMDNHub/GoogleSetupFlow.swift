@@ -398,10 +398,7 @@ enum SecurityDomainUnlock {
 
                     return (
                         index,
-                        UInt8(
-                            truncating:
-                                number
-                        )
+                        number.uint8Value
                     )
                 }
                 .sorted { $0.0 < $1.0 }

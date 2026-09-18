@@ -74,7 +74,7 @@ enum PushRegistrationService {
     }
 
     private static func gcmCheckin() async throws -> (androidID: String, securityToken: String) {
-        func payload() -> Data {
+        func makePayload() -> Data {
             var chrome = ProtoWriter()
             chrome.varint(1, 3)
             chrome.string(2, "94.0.4606.51")
@@ -93,15 +93,17 @@ enum PushRegistrationService {
 
         var lastError = "Unknown GCM check-in error"
 
-        for attempt in 1...20 {
+        // Match the working fork: GCM check-in is deliberately very patient.
+        // Google sometimes rejects or times out several initial requests before
+        // issuing a valid android_id/security_token pair.
+        for attempt in 1...100 {
             var req = URLRequest(
                 url: URL(
-                    string:
-                        "https://android.clients.google.com/checkin"
+                    string: "https://android.clients.google.com/checkin"
                 )!
             )
             req.httpMethod = "POST"
-            req.httpBody = payload()
+            req.httpBody = makePayload()
             req.timeoutInterval = 30
             req.setValue(
                 "application/x-protobuf",
@@ -110,9 +112,7 @@ enum PushRegistrationService {
 
             do {
                 let (data, response) =
-                    try await URLSession.shared.data(
-                        for: req
-                    )
+                    try await URLSession.shared.data(for: req)
 
                 let status =
                     (response as? HTTPURLResponse)?
@@ -121,25 +121,21 @@ enum PushRegistrationService {
 
                 if status == 200 {
                     let fields =
-                        try ProtoReader.read(
-                            data
-                        )
+                        try ProtoReader.read(data)
 
                     if let android =
-                            fields.first(7)?
-                                .fixed64,
-                       let sec =
-                            fields.first(8)?
-                                .fixed64
+                            fields.first(7)?.fixed64,
+                       let security =
+                            fields.first(8)?.fixed64
                     {
                         return (
                             String(android),
-                            String(sec)
+                            String(security)
                         )
                     }
 
                     lastError =
-                        "HTTP 200 but Android ID/security token were missing"
+                        "HTTP 200 but GCM check-in IDs were missing"
                 } else {
                     lastError =
                         "HTTP \(status): "
@@ -153,11 +149,13 @@ enum PushRegistrationService {
                     error.localizedDescription
             }
 
-            if attempt < 20 {
-                try await Task.sleep(
-                    for: .seconds(1)
-                )
+            guard attempt < 100 else {
+                break
             }
+
+            try await Task.sleep(
+                for: .seconds(1)
+            )
         }
 
         throw FindHubError.network(
@@ -180,9 +178,8 @@ enum PushRegistrationService {
         var lastError =
             "Unknown GCM registration error"
 
-        // Mirrors the working cert/SHA1 fork: keep the same
-        // Android identity, app subtype and legacy sender, and retry
-        // server Error= responses instead of rotating sender values.
+        // The working fork retries *every* GCM Error response and network
+        // failure up to 100 times with the same legacy sender key.
         for attempt in 1...100 {
             var req = URLRequest(
                 url: URL(
@@ -216,8 +213,7 @@ enum PushRegistrationService {
                         as: UTF8.self
                     )
                     .trimmingCharacters(
-                        in:
-                            .whitespacesAndNewlines
+                        in: .whitespacesAndNewlines
                     )
 
                 let status =
@@ -225,73 +221,28 @@ enum PushRegistrationService {
                         .statusCode
                     ?? -1
 
-                if status == 200 {
-                    for line in text
-                        .split(
-                            whereSeparator:
-                                \.isNewline
+                for line in text.split(
+                    whereSeparator: { $0.isNewline }
+                ) {
+                    let value = String(line)
+
+                    if value.hasPrefix("token=") {
+                        return String(
+                            value.dropFirst(6)
                         )
-                    {
-                        let parts =
-                            line.split(
-                                separator: "=",
-                                maxSplits: 1
-                            )
-
-                        if parts.count == 2,
-                           parts[0]
-                            .lowercased()
-                            == "token"
-                        {
-                            let token =
-                                String(parts[1])
-
-                            if !token.isEmpty {
-                                return token
-                            }
-                        }
                     }
                 }
 
-                lastError =
-                    text.isEmpty
+                lastError = text.isEmpty
                     ? "HTTP \(status)"
                     : text
-
-                let isStructuredError =
-                    text
-                        .split(
-                            whereSeparator:
-                                \.isNewline
-                        )
-                        .contains {
-                            $0
-                                .lowercased()
-                                .hasPrefix(
-                                    "error="
-                                )
-                        }
-
-                // The reference implementation retries every Error=...
-                // response with the same identity/sender. Network/5xx
-                // responses are also safe to retry here.
-                let retryable =
-                    isStructuredError
-                    || status >= 500
-                    || status == -1
-
-                guard retryable,
-                      attempt < 100
-                else {
-                    break
-                }
             } catch {
                 lastError =
                     error.localizedDescription
+            }
 
-                guard attempt < 100 else {
-                    break
-                }
+            guard attempt < 100 else {
+                break
             }
 
             try await Task.sleep(
@@ -305,58 +256,253 @@ enum PushRegistrationService {
     }
 
     private static func firebaseInstall() async throws -> (token: String, refreshToken: String, fid: String) {
-        var fidBytes = [UInt8](repeating: 0, count: 17)
-        guard SecRandomCopyBytes(kSecRandomDefault, fidBytes.count, &fidBytes) == errSecSuccess else { throw FindHubError.crypto("Random generation failed") }
-        fidBytes[0] = 0x70 | (fidBytes[0] & 0x0f)
-        let fid = Data(fidBytes).base64EncodedString()
-        let payload: [String: Any] = ["appId": appID, "authVersion": "FIS_v2", "fid": fid, "sdkVersion": "w:0.6.6"]
-        var req = URLRequest(url: URL(string: "https://firebaseinstallations.googleapis.com/v1/projects/\(projectID)/installations")!)
-        req.httpMethod = "POST"; req.httpBody = try JSONSerialization.data(withJSONObject: payload); req.timeoutInterval = 30
-        let heartbeat = Data(
-            "{\"heartbeats\":[],\"version\":2}".utf8
-        ).base64EncodedString()
-        req.setValue(
-            heartbeat,
-            forHTTPHeaderField: "x-firebase-client"
-        )
-        req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-        req.setValue(package, forHTTPHeaderField: "X-Android-Package")
-        req.setValue(certificateSHA1, forHTTPHeaderField: "X-Android-Cert")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
-              let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let auth = obj["authToken"] as? [String: Any],
-              let token = auth["token"] as? String,
-              let refresh = obj["refreshToken"] as? String,
-              let returnedFID = obj["fid"] as? String else {
-            throw FindHubError.network("Firebase installation failed: \(String(decoding: data, as: UTF8.self))")
+        var lastError =
+            "Unknown Firebase installation error"
+
+        for attempt in 1...8 {
+            var fidBytes =
+                [UInt8](
+                    repeating: 0,
+                    count: 17
+                )
+
+            guard
+                SecRandomCopyBytes(
+                    kSecRandomDefault,
+                    fidBytes.count,
+                    &fidBytes
+                ) == errSecSuccess
+            else {
+                throw FindHubError.crypto(
+                    "Random generation failed"
+                )
+            }
+
+            fidBytes[0] =
+                0x70 | (fidBytes[0] & 0x0f)
+
+            let fid =
+                Data(fidBytes)
+                    .base64EncodedString()
+
+            let payload: [String: Any] = [
+                "appId": appID,
+                "authVersion": "FIS_v2",
+                "fid": fid,
+                "sdkVersion": "w:0.6.6"
+            ]
+
+            var req = URLRequest(
+                url: URL(
+                    string:
+                        "https://firebaseinstallations.googleapis.com/v1/projects/\(projectID)/installations"
+                )!
+            )
+            req.httpMethod = "POST"
+            req.httpBody =
+                try JSONSerialization.data(
+                    withJSONObject: payload
+                )
+            req.timeoutInterval = 30
+
+            let heartbeat =
+                Data(
+                    "{\"heartbeats\":[],\"version\":2}".utf8
+                )
+                .base64EncodedString()
+
+            req.setValue(
+                heartbeat,
+                forHTTPHeaderField:
+                    "x-firebase-client"
+            )
+            req.setValue(
+                apiKey,
+                forHTTPHeaderField:
+                    "x-goog-api-key"
+            )
+            req.setValue(
+                package,
+                forHTTPHeaderField:
+                    "X-Android-Package"
+            )
+            req.setValue(
+                certificateSHA1,
+                forHTTPHeaderField:
+                    "X-Android-Cert"
+            )
+            req.setValue(
+                "application/json",
+                forHTTPHeaderField:
+                    "Content-Type"
+            )
+
+            do {
+                let (data, response) =
+                    try await URLSession.shared.data(
+                        for: req
+                    )
+
+                let status =
+                    (response as? HTTPURLResponse)?
+                        .statusCode
+                    ?? -1
+
+                if status == 200,
+                   let obj =
+                    try JSONSerialization
+                        .jsonObject(
+                            with: data
+                        )
+                        as? [String: Any],
+                   let auth =
+                    obj["authToken"]
+                        as? [String: Any],
+                   let token =
+                    auth["token"] as? String,
+                   let refresh =
+                    obj["refreshToken"]
+                        as? String,
+                   let returnedFID =
+                    obj["fid"] as? String
+                {
+                    return (
+                        token,
+                        refresh,
+                        returnedFID
+                    )
+                }
+
+                lastError =
+                    "HTTP \(status): "
+                    + String(
+                        decoding: data,
+                        as: UTF8.self
+                    )
+            } catch {
+                lastError =
+                    error.localizedDescription
+            }
+
+            guard attempt < 8 else {
+                break
+            }
+
+            try await Task.sleep(
+                for: .seconds(1)
+            )
         }
-        return (token, refresh, returnedFID)
+
+        throw FindHubError.network(
+            "Firebase installation failed after retries: \(lastError)"
+        )
     }
 
-    private static func firebaseRegister(gcmToken: String, installationToken: String, publicKey: Data, authSecret: Data) async throws -> String {
-        let payload: [String: Any] = ["web": [
-            "applicationPubKey": NSNull(),
-            "auth": authSecret.base64URL,
-            "endpoint": "https://fcm.googleapis.com/fcm/send/\(gcmToken)",
-            "p256dh": publicKey.base64URL
-        ]]
-        var req = URLRequest(url: URL(string: "https://fcmregistrations.googleapis.com/v1/projects/\(projectID)/registrations")!)
-        req.httpMethod = "POST"; req.httpBody = try JSONSerialization.data(withJSONObject: payload); req.timeoutInterval = 30
-        req.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-        req.setValue(installationToken, forHTTPHeaderField: "x-goog-firebase-installations-auth")
-        req.setValue(package, forHTTPHeaderField: "X-Android-Package")
-        req.setValue(certificateSHA1, forHTTPHeaderField: "X-Android-Cert")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
-              let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw FindHubError.network("FCM registration failed: \(String(decoding: data, as: UTF8.self))")
+    private static func firebaseRegister(
+        gcmToken: String,
+        installationToken: String,
+        publicKey: Data,
+        authSecret: Data
+    ) async throws -> String {
+        let payload: [String: Any] = [
+            "web": [
+                "auth": authSecret.base64URL,
+                "endpoint":
+                    "https://fcm.googleapis.com/fcm/send/\(gcmToken)",
+                "p256dh": publicKey.base64URL
+            ]
+        ]
+
+        var lastError =
+            "Unknown FCM registration error"
+
+        for attempt in 1...8 {
+            var req = URLRequest(
+                url: URL(
+                    string:
+                        "https://fcmregistrations.googleapis.com/v1/projects/\(projectID)/registrations"
+                )!
+            )
+            req.httpMethod = "POST"
+            req.httpBody =
+                try JSONSerialization.data(
+                    withJSONObject: payload
+                )
+            req.timeoutInterval = 30
+            req.setValue(
+                apiKey,
+                forHTTPHeaderField:
+                    "x-goog-api-key"
+            )
+            req.setValue(
+                installationToken,
+                forHTTPHeaderField:
+                    "x-goog-firebase-installations-auth"
+            )
+            req.setValue(
+                package,
+                forHTTPHeaderField:
+                    "X-Android-Package"
+            )
+            req.setValue(
+                certificateSHA1,
+                forHTTPHeaderField:
+                    "X-Android-Cert"
+            )
+            req.setValue(
+                "application/json",
+                forHTTPHeaderField:
+                    "Content-Type"
+            )
+
+            do {
+                let (data, response) =
+                    try await URLSession.shared.data(
+                        for: req
+                    )
+
+                let status =
+                    (response as? HTTPURLResponse)?
+                        .statusCode
+                    ?? -1
+
+                if status == 200,
+                   let obj =
+                    try JSONSerialization
+                        .jsonObject(
+                            with: data
+                        )
+                        as? [String: Any],
+                   let token =
+                    obj["token"] as? String,
+                   !token.isEmpty
+                {
+                    return token
+                }
+
+                lastError =
+                    "HTTP \(status): "
+                    + String(
+                        decoding: data,
+                        as: UTF8.self
+                    )
+            } catch {
+                lastError =
+                    error.localizedDescription
+            }
+
+            guard attempt < 8 else {
+                break
+            }
+
+            try await Task.sleep(
+                for: .seconds(1)
+            )
         }
-        if let token = obj["token"] as? String { return token }
-        if let name = obj["name"] as? String { return name.components(separatedBy: "/").last ?? name }
-        throw FindHubError.network("FCM registration token missing")
+
+        throw FindHubError.network(
+            "FCM registration failed after retries: \(lastError)"
+        )
     }
 
     private static func formEncoded(_ dict: [String: String]) -> Data {

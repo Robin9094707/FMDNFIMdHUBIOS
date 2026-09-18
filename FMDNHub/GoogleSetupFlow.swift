@@ -256,7 +256,7 @@ struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
                 return "(no URL)"
             }
 
-            return "(url.host ?? "?")(url.path)"
+            return "\(url.host ?? "?")\(url.path)"
         }
 
         func beginFreshSetup(

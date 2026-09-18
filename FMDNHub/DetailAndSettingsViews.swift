@@ -330,6 +330,24 @@ struct SettingsView: View {
                 }
 
                 Section("Diagnostics") {
+                    LabeledContent(
+                        "Push channel",
+                        value:
+                            session.pushChannelStatus
+                    )
+
+                    Button(
+                        "Test push connection"
+                    ) {
+                        Task {
+                            await session
+                                .testPushConnection()
+                        }
+                    }
+                    .disabled(
+                        session.isBusy
+                    )
+
                     Button(
                         "Reset iPhone push identity"
                     ) {

@@ -1,5 +1,5 @@
 import Foundation
-import Network
+@preconcurrency import Network
 
 enum AndroidAuthService {
     static let clientSignature = "38918a453d07199354f8b19af05ec6562ced5788"
@@ -244,8 +244,7 @@ private enum HTTP1TLSClient {
         _ data: Data
     ) throws -> Data {
         guard let marker =
-                Data("\r\n\r\n".utf8)
-                    .range(in: data) else {
+                data.range(of: Data("\r\n\r\n".utf8)) else {
             throw FindHubError.network(
                 "Malformed HTTP response"
             )
@@ -304,8 +303,7 @@ private enum HTTP1TLSClient {
 
         while !input.isEmpty {
             guard let range =
-                    Data("\r\n".utf8)
-                        .range(in: input)
+                    input.range(of: Data("\r\n".utf8))
             else {
                 break
             }
@@ -319,7 +317,7 @@ private enum HTTP1TLSClient {
             guard let count = Int(
                 line.trimmingCharacters(
                     in:
-                        .whitespacesAndNewlines
+                        CharacterSet.whitespacesAndNewlines
                 ),
                 radix: 16
             ) else {

@@ -48,7 +48,7 @@ jobs:
 
       - name: Package unsigned IPA
         run: |
-          APP_PATH="DerivedData/Build/Products/Release-iphoneos/FMDNHub.app"
+          APP_PATH="DerivedData/Build/Products/Release-iphoneos/Find Hub.app"
           test -d "$APP_PATH"
           rm -rf Payload FindHub-unsigned.ipa
           mkdir Payload

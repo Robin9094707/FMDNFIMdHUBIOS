@@ -35,24 +35,76 @@ struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
+        configuration.applicationNameForUserAgent = "MinuteMaid"
 
         let webView = WKWebView(
             frame: .zero,
             configuration: configuration
         )
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         context.coordinator.webView = webView
 
         let request = URLRequest(
-            url: URL(
-                string: "https://accounts.google.com/EmbeddedSetup"
-            )!
+            url: Self.embeddedSetupURL()
         )
 
         webView.load(request)
         context.coordinator.startCookiePolling()
 
         return webView
+    }
+
+    private static func embeddedSetupURL() -> URL {
+        let language =
+            Locale.current.language.languageCode?.identifier
+            ?? "en"
+
+        let region =
+            Locale.current.region?.identifier
+                .lowercased()
+            ?? "us"
+
+        let locale =
+            Locale.current.identifier
+                .replacingOccurrences(
+                    of: "_",
+                    with: "-"
+                )
+
+        var components = URLComponents(
+            string:
+                "https://accounts.google.com/EmbeddedSetup"
+        )!
+
+        components.queryItems = [
+            URLQueryItem(
+                name: "source",
+                value: "android"
+            ),
+            URLQueryItem(
+                name: "xoauth_display_name",
+                value: "Find Hub"
+            ),
+            URLQueryItem(
+                name: "lang",
+                value: language
+            ),
+            URLQueryItem(
+                name: "cc",
+                value: region
+            ),
+            URLQueryItem(
+                name: "hl",
+                value: locale
+            ),
+            URLQueryItem(
+                name: "tmpl",
+                value: "new_account"
+            )
+        ]
+
+        return components.url!
     }
 
     func updateUIView(
@@ -67,9 +119,14 @@ struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
         coordinator.stop()
         uiView.stopLoading()
         uiView.navigationDelegate = nil
+        uiView.uiDelegate = nil
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator:
+        NSObject,
+        WKNavigationDelegate,
+        WKUIDelegate
+    {
         let onToken: (String) -> Void
         weak var webView: WKWebView?
         private var timer: Timer?
@@ -131,6 +188,21 @@ struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
             didFinish navigation: WKNavigation!
         ) {
             checkCookies()
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if navigationAction.targetFrame == nil {
+                webView.load(
+                    navigationAction.request
+                )
+            }
+
+            return nil
         }
     }
 }

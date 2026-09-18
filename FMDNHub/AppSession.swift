@@ -8,6 +8,7 @@ final class AppSession: ObservableObject {
     @Published var isBusy = false
     @Published var status = "Ready"
     @Published var errorMessage: String?
+    @Published var debugEvents: [String] = []
 
     private var pushCredentials: PushCredentials?
     private var pushBootstrap: PushBootstrapIdentity?
@@ -23,6 +24,7 @@ final class AppSession: ObservableObject {
         pushBootstrap = SecureStore.load(PushBootstrapIdentity.self, key: "push_bootstrap")
         sequence = SecureStore.load(SequenceState.self, key: "sequence") ?? SequenceState()
         loadPreferences()
+        debug("App session initialized")
         if secrets != nil {
             Task { await refreshDevices() }
         }
@@ -37,6 +39,7 @@ final class AppSession: ObservableObject {
     }
 
     func prepareGeneratedSetup() async -> Bool {
+        debug("Preparing Google setup")
         isBusy = true
         status = "Preparing Google sign in…"
         defer { isBusy = false }
@@ -57,6 +60,7 @@ final class AppSession: ObservableObject {
             }
 
             status = "Continue with Google"
+            debug("Bootstrap identity ready; opening Google EmbeddedSetup")
             return true
         } catch {
             present(error)
@@ -81,6 +85,7 @@ final class AppSession: ObservableObject {
 
         isBusy = true
         status = "Connecting your Google account…"
+        debug("EmbeddedSetup oauth_token received; exchanging with Google")
         defer { isBusy = false }
 
         do {
@@ -102,6 +107,7 @@ final class AppSession: ObservableObject {
 
             status =
                 "Google connected. Unlock Find Hub encryption."
+            debug("Google token exchange succeeded; ready for finder_hw unlock")
             return true
         } catch {
             present(error)
@@ -125,6 +131,7 @@ final class AppSession: ObservableObject {
 
         isBusy = true
         status = "Saving Find Hub encryption keys…"
+        debug("Vault callback received; parsing finder_hw key")
         defer { isBusy = false }
 
         do {
@@ -136,6 +143,7 @@ final class AppSession: ObservableObject {
 
             generated.sharedKeyHex =
                 vault.key.hex
+            debug("finder_hw shared key parsed successfully")
 
             // Store the shared key first. Owner-key retrieval uses it
             // and can be retried later if Google temporarily rejects Spot.
@@ -153,7 +161,9 @@ final class AppSession: ObservableObject {
                         )
                 generated.ownerKeyHex =
                     owner.0.hex
+                debug("Owner key retrieved successfully")
             } catch {
+                debug("Owner key retrieval deferred: \(error.localizedDescription)")
                 // A valid shared finder_hw key is sufficient to retry
                 // owner-key retrieval during the first Locate request.
             }
@@ -172,6 +182,7 @@ final class AppSession: ObservableObject {
 
             status =
                 "Find Hub account ready"
+            debug("Generated secrets saved locally")
 
             await refreshDevices()
             return true
@@ -420,7 +431,27 @@ final class AppSession: ObservableObject {
         status = "Signed out locally"
     }
 
+    func debug(_ message: String) {
+        let stamp = Date.now.formatted(
+            date: .omitted,
+            time: .standard
+        )
+        let entry = "[\(stamp)] \(message)"
+        debugEvents.append(entry)
+        if debugEvents.count > 150 {
+            debugEvents.removeFirst(
+                debugEvents.count - 150
+            )
+        }
+    }
+
+    func clearDebugLog() {
+        debugEvents.removeAll()
+        debug("Debug log cleared")
+    }
+
     private func present(_ error: Error) {
+        debug("Error: \(error.localizedDescription)")
         errorMessage = (error as? LocalizedError)?.errorDescription
             ?? error.localizedDescription
         status = "Error"

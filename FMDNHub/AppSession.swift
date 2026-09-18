@@ -39,56 +39,50 @@ final class AppSession: ObservableObject {
     }
 
     func prepareGeneratedSetup() async -> Bool {
-        debug("Preparing Google setup")
-        isBusy = true
-        status = "Preparing Google sign in…"
-        defer { isBusy = false }
-
-        do {
-            if pushCredentials == nil,
-               pushBootstrap == nil {
-                let identity =
-                    try await PushRegistrationService
-                        .bootstrapIdentity()
-
-                pushBootstrap = identity
-
-                try SecureStore.save(
-                    identity,
-                    key: "push_bootstrap"
-                )
-            }
-
-            status = "Continue with Google"
-            debug("Bootstrap identity ready; opening Google EmbeddedSetup")
-            return true
-        } catch {
-            present(error)
-            return false
-        }
+        debug("Opening Google EmbeddedSetup")
+        status = "Continue with Google"
+        return true
     }
 
     func completeEmbeddedSetup(
         oauthToken: String
     ) async -> Bool {
-        guard let androidID =
-                pushCredentials?.androidID
-                ?? pushBootstrap?.androidID
-        else {
-            present(
-                FindHubError.notReady(
-                    "The Google bootstrap identity is not ready."
-                )
-            )
-            return false
-        }
-
         isBusy = true
         status = "Connecting your Google account…"
-        debug("EmbeddedSetup oauth_token received; exchanging with Google")
+        debug("EmbeddedSetup oauth_token received")
         defer { isBusy = false }
 
         do {
+            let androidID: String
+
+            if let existing =
+                    pushCredentials?.androidID
+                    ?? pushBootstrap?.androidID
+            {
+                androidID = existing
+                debug("Reusing existing Google bootstrap identity")
+            } else {
+                status = "Creating secure Google device identity…"
+                debug("Creating GCM check-in identity after Google sign-in")
+
+                let identity =
+                    try await PushRegistrationService
+                        .bootstrapIdentity()
+
+                pushBootstrap = identity
+                androidID = identity.androidID
+
+                try SecureStore.save(
+                    identity,
+                    key: "push_bootstrap"
+                )
+
+                debug("GCM bootstrap identity created")
+            }
+
+            status = "Connecting your Google account…"
+            debug("Exchanging EmbeddedSetup token with Google")
+
             let result =
                 try await AndroidAuthService
                     .exchangeEmbeddedSetupToken(

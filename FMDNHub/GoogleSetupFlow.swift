@@ -211,14 +211,16 @@ struct GoogleEmbeddedSetupWebView: UIViewRepresentable {
 
 struct SecurityUnlockSheet: View {
     let onVaultKeys: (String) -> Void
+    let onDebug: (String) -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             SecurityUnlockWebView(
-                url: SecurityDomainUnlock.requestURL(),
+                unlockURL: SecurityDomainUnlock.requestURL(),
                 onVaultKeys: onVaultKeys,
-                onClose: { dismiss() }
+                onClose: { dismiss() },
+                onDebug: onDebug
             )
             .ignoresSafeArea(edges: .bottom)
             .navigationTitle("Unlock encryption")
@@ -235,42 +237,90 @@ struct SecurityUnlockSheet: View {
 }
 
 struct SecurityUnlockWebView: UIViewRepresentable {
-    let url: URL
+    let unlockURL: URL
     let onVaultKeys: (String) -> Void
     let onClose: () -> Void
+    let onDebug: (String) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
+            unlockURL: unlockURL,
             onVaultKeys: onVaultKeys,
-            onClose: onClose
+            onClose: onClose,
+            onDebug: onDebug
         )
     }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
+        configuration.applicationNameForUserAgent = "MinuteMaid"
 
         let controller = WKUserContentController()
 
+        // Google may assign window.mm after our document-start script runs.
+        // Keep a property wrapper installed so our capture hooks survive that
+        // assignment while still calling Google's own implementation.
         let bridge = """
-        window.mm = {
-          setVaultSharedKeys: function(str, vaultKeys) {
+        (() => {
+          const post = (payload) => {
             try {
-              window.webkit.messageHandlers.findHubVault.postMessage({
-                method: "setVaultSharedKeys",
-                str: String(str || ""),
-                vaultKeys: vaultKeys
-              });
-            } catch (e) {}
-          },
-          closeView: function() {
-            try {
-              window.webkit.messageHandlers.findHubVault.postMessage({
-                method: "closeView"
-              });
-            } catch (e) {}
-          }
-        };
+              window.webkit.messageHandlers.findHubVault.postMessage(payload);
+            } catch (_) {}
+          };
+
+          const wrapMethod = (obj, name, marker, capture) => {
+            if (!obj || obj[marker]) return;
+            let target = (typeof obj[name] === 'function') ? obj[name] : null;
+            const call = function() {
+              try { capture.apply(null, arguments); } catch (_) {}
+              if (target) return target.apply(this, arguments);
+            };
+            Object.defineProperty(obj, name, {
+              configurable: true,
+              enumerable: true,
+              get: () => call,
+              set: (fn) => {
+                target = (typeof fn === 'function') ? fn : null;
+              }
+            });
+            obj[marker] = true;
+          };
+
+          const wrapVault = (value) => {
+            const obj = (value && typeof value === 'object') ? value : {};
+            wrapMethod(
+              obj,
+              'setVaultSharedKeys',
+              '__findhub_keys_wrapped',
+              function(str, vaultKeys) {
+                post({
+                  method: 'setVaultSharedKeys',
+                  str: String(str || ''),
+                  vaultKeys: vaultKeys
+                });
+              }
+            );
+            wrapMethod(
+              obj,
+              'closeView',
+              '__findhub_close_wrapped',
+              function() {
+                post({ method: 'closeView' });
+              }
+            );
+            return obj;
+          };
+
+          let mm = wrapVault(window.mm);
+          Object.defineProperty(window, 'mm', {
+            configurable: true,
+            enumerable: true,
+            get: () => mm,
+            set: (value) => { mm = wrapVault(value); }
+          });
+        })();
         """
 
         controller.addUserScript(
@@ -292,7 +342,20 @@ struct SecurityUnlockWebView: UIViewRepresentable {
             configuration: configuration
         )
         webView.navigationDelegate = context.coordinator
-        webView.load(URLRequest(url: url))
+        webView.uiDelegate = context.coordinator
+
+        context.coordinator.webView = webView
+        context.coordinator.log("Unlock preflight: accounts.google.com")
+
+        // Mirror the working browser flow: establish/confirm the regular
+        // Google account session first, then navigate to the security domain.
+        webView.load(
+            URLRequest(
+                url: URL(
+                    string: "https://accounts.google.com/"
+                )!
+            )
+        )
 
         return webView
     }
@@ -313,23 +376,132 @@ struct SecurityUnlockWebView: UIViewRepresentable {
             )
         uiView.stopLoading()
         uiView.navigationDelegate = nil
+        uiView.uiDelegate = nil
     }
 
     final class Coordinator:
         NSObject,
         WKScriptMessageHandler,
-        WKNavigationDelegate
+        WKNavigationDelegate,
+        WKUIDelegate
     {
+        let unlockURL: URL
         let onVaultKeys: (String) -> Void
         let onClose: () -> Void
+        let onDebug: (String) -> Void
+        weak var webView: WKWebView?
+
         private var completed = false
+        private var openedUnlock = false
 
         init(
+            unlockURL: URL,
             onVaultKeys: @escaping (String) -> Void,
-            onClose: @escaping () -> Void
+            onClose: @escaping () -> Void,
+            onDebug: @escaping (String) -> Void
         ) {
+            self.unlockURL = unlockURL
             self.onVaultKeys = onVaultKeys
             self.onClose = onClose
+            self.onDebug = onDebug
+        }
+
+        func log(_ message: String) {
+            DispatchQueue.main.async {
+                self.onDebug(message)
+            }
+        }
+
+        private func safeDescription(_ url: URL?) -> String {
+            guard let url else { return "(no URL)" }
+            return "\(url.host ?? "?")\(url.path)"
+        }
+
+        private func openUnlockIfAuthenticated(_ url: URL?) {
+            guard !openedUnlock,
+                  let url else {
+                return
+            }
+
+            let host = url.host?.lowercased() ?? ""
+
+            // The reference implementation waits for myaccount.google.com.
+            // Some Google sessions stay on accounts.google.com with an
+            // authenticated account chooser; in that case we only proceed
+            // after a completed accounts navigation that is not a login form.
+            if host == "myaccount.google.com" {
+                openedUnlock = true
+                log(
+                    "Google account session confirmed; opening finder_hw unlock (kdi length: \(SecurityDomainUnlock.kdiLength()))"
+                )
+                webView?.load(
+                    URLRequest(url: unlockURL)
+                )
+            }
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didStartProvisionalNavigation navigation: WKNavigation!
+        ) {
+            log(
+                "Navigation started: \(safeDescription(webView.url))"
+            )
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFinish navigation: WKNavigation!
+        ) {
+            log(
+                "Navigation finished: \(safeDescription(webView.url))"
+            )
+            openUnlockIfAuthenticated(webView.url)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationResponse: WKNavigationResponse,
+            decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+        ) {
+            if let http = navigationResponse.response as? HTTPURLResponse {
+                log(
+                    "HTTP \(http.statusCode): \(safeDescription(http.url))"
+                )
+            }
+            decisionHandler(.allow)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFail navigation: WKNavigation!,
+            withError error: Error
+        ) {
+            log(
+                "Navigation failed: \(error.localizedDescription)"
+            )
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFailProvisionalNavigation navigation: WKNavigation!,
+            withError error: Error
+        ) {
+            log(
+                "Provisional navigation failed: \(error.localizedDescription)"
+            )
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if navigationAction.targetFrame == nil {
+                webView.load(navigationAction.request)
+            }
+            return nil
         }
 
         func userContentController(
@@ -343,6 +515,8 @@ struct SecurityUnlockWebView: UIViewRepresentable {
                     as? String else {
                 return
             }
+
+            log("Vault bridge callback: \(method)")
 
             if method == "closeView" {
                 DispatchQueue.main.async {
@@ -376,13 +550,15 @@ struct SecurityUnlockWebView: UIViewRepresentable {
                 }
 
                 completed = true
+                log("Vault keys received from Google")
 
                 DispatchQueue.main.async {
                     self.onVaultKeys(string)
                 }
             } catch {
-                // The session layer will surface protocol errors after
-                // a valid setVaultSharedKeys callback is received.
+                log(
+                    "Vault callback parse failed: \(error.localizedDescription)"
+                )
             }
         }
     }
@@ -403,20 +579,38 @@ enum SecurityDomainUnlock {
             UUID().uuidString.lowercased()
         )
 
-        var components = URLComponents(
+        let kdi =
+            extras.data
+                .base64EncodedString()
+                .replacingOccurrences(
+                    of: "+",
+                    with: "-"
+                )
+                .replacingOccurrences(
+                    of: "/",
+                    with: "_"
+                )
+                .replacingOccurrences(
+                    of: "=",
+                    with: ""
+                )
+
+        return URL(
             string:
-                "https://accounts.google.com/encryption/unlock/android"
+                "https://accounts.google.com/encryption/unlock/android?kdi=\(kdi)"
         )!
+    }
 
-        components.queryItems = [
-            URLQueryItem(
-                name: "kdi",
-                value:
-                    extras.data.base64EncodedString()
-            )
-        ]
-
-        return components.url!
+    static func kdiLength() -> Int {
+        let url = requestURL()
+        return URLComponents(
+            url: url,
+            resolvingAgainstBaseURL: false
+        )?
+        .queryItems?
+        .first(where: { $0.name == "kdi" })?
+        .value?
+        .count ?? 0
     }
 
     static func parseFinderHWKey(

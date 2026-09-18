@@ -407,9 +407,12 @@ final class AppSession: ObservableObject {
     func resetPushIdentity() {
         pushCredentials = nil
         pushBootstrap = nil
+        pendingGeneratedSecrets = nil
+        errorMessage = nil
         SecureStore.delete("push")
         SecureStore.delete("push_bootstrap")
-        status = "Push identity reset"
+        status = "Setup identity reset"
+        debug("Push/bootstrap identity reset")
     }
 
     func signOut() {

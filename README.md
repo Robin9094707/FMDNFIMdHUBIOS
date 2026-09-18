@@ -15,7 +15,7 @@ Native SwiftUI client for your own Google Find Hub / Find My Device trackers, ba
 - Import/export of `secrets.json` remains available as an advanced fallback
 - Local `sequence.json` import/export for client UUID/request state
 - Direct `nbe_list_devices` calls to Google Nova
-- Fresh GCM/FCM registration on the iPhone for location replies
+- Fresh GCM/FCM registration on the iPhone for location replies, including Android package/certificate restriction headers and retry behavior aligned with the working SHA1 fork
 - Foreground MCS connection to Google push infrastructure
 - `nbe_execute_action` Locate requests
 - Spot owner-key retrieval
@@ -27,14 +27,14 @@ Native SwiftUI client for your own Google Find Hub / Find My Device trackers, ba
 ## In-app authentication flow
 
 1. Tap **Sign in with Google**.
-2. The app prepares its own Android/GCM identity on the iPhone.
-3. A WKWebView opens Google's `https://accounts.google.com/EmbeddedSetup` flow.
-4. Sign in normally on Google's page, including password and 2-Step Verification if Google requests them.
-5. After Google issues the short-lived `oauth_token`, the app exchanges it on-device for the AAS/master token.
-6. The app opens Google's `https://accounts.google.com/encryption/unlock/android` flow for the `finder_hw` security domain.
-7. Google may ask for the screen-lock PIN of an Android device already associated with the account.
-8. Google returns the Find Hub vault shared key to the embedded Android-style bridge.
-9. The app derives/retrieves the owner key, generates its local Find Hub secrets and loads the account's trackers.
+2. A WKWebView opens Google's `https://accounts.google.com/EmbeddedSetup` flow immediately; GCM registration cannot block the login screen.
+3. Sign in normally on Google's page, including password and 2-Step Verification if Google requests them.
+4. After Google issues the short-lived `oauth_token`, the app creates/reuses its Android/GCM check-in identity and exchanges the token on-device for the AAS/master token.
+5. The app opens Google's `https://accounts.google.com/encryption/unlock/android` flow for the `finder_hw` security domain.
+6. Google may ask for the screen-lock PIN of an Android device already associated with the account.
+7. Google returns the Find Hub vault shared key to the embedded Android-style bridge.
+8. The app derives/retrieves the owner key, generates its local Find Hub secrets and loads the account's trackers.
+9. Full GCM/FCM push registration is deferred until a Locate request actually needs it.
 
 The app does **not** read or store the Google password or Android-device PIN. Those values are entered into Google-hosted pages. The app does receive and store the resulting authentication tokens and E2EE key material required to access the signed-in user's Find Hub account.
 

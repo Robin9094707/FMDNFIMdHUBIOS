@@ -105,7 +105,8 @@ enum PushRegistrationService {
         // Current GoogleFindMyTools treats PHONE_REGISTRATION_ERROR as
         // transient. Google can return it for several consecutive requests
         // before accepting the same Android/GCM identity.
-        for attempt in 1...20 {
+        let maxAttempts = 100
+        for attempt in 1...maxAttempts {
             var req = URLRequest(
                 url: URL(
                     string:
@@ -160,14 +161,14 @@ enum PushRegistrationService {
                     )
 
                 guard isPhoneRegistrationError,
-                      attempt < 20 else {
+                      attempt < maxAttempts else {
                     break
                 }
             } catch {
                 lastError =
                     error.localizedDescription
 
-                guard attempt < 20 else {
+                guard attempt < maxAttempts else {
                     break
                 }
             }

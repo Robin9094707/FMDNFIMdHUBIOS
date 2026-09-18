@@ -337,6 +337,7 @@ enum PushRegistrationService {
 
     private static func firebaseRegister(gcmToken: String, installationToken: String, publicKey: Data, authSecret: Data) async throws -> String {
         let payload: [String: Any] = ["web": [
+            "applicationPubKey": NSNull(),
             "auth": authSecret.base64URL,
             "endpoint": "https://fcm.googleapis.com/fcm/send/\(gcmToken)",
             "p256dh": publicKey.base64URL

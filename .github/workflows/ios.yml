@@ -1,0 +1,72 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Swift syntax preflight
+        run: swiftc -frontend -parse $(find FMDNHub -name '*.swift' -print)
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Resolve packages
+        run: xcodebuild -resolvePackageDependencies -project FMDNHub.xcodeproj -scheme FMDNHub
+
+      - name: Build unsigned app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project FMDNHub.xcodeproj \
+            -scheme FMDNHub \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            build | tee xcodebuild.log
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH="DerivedData/Build/Products/Release-iphoneos/FMDNHub.app"
+          test -d "$APP_PATH"
+          rm -rf Payload FindHub-unsigned.ipa
+          mkdir Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry FindHub-unsigned.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: FindHub-iOS-unsigned
+          path: FindHub-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+          if-no-files-found: ignore

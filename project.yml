@@ -1,0 +1,42 @@
+name: FMDNHub
+options:
+  bundleIdPrefix: de.robin9094707
+  deploymentTarget:
+    iOS: '18.0'
+  xcodeVersion: '16.0'
+packages:
+  BigInt:
+    url: https://github.com/attaswift/BigInt.git
+    from: 5.5.0
+  CryptoSwift:
+    url: https://github.com/krzyzanowskim/CryptoSwift.git
+    from: 1.8.4
+settings:
+  base:
+    SWIFT_VERSION: '6.0'
+    SWIFT_STRICT_CONCURRENCY: minimal
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: 1.0.0
+    TARGETED_DEVICE_FAMILY: '1,2'
+targets:
+  FMDNHub:
+    type: application
+    platform: iOS
+    sources:
+      - path: FMDNHub
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.robin9094707.fmdnhub
+        PRODUCT_NAME: Find Hub
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Find Hub
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ''
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    dependencies:
+      - package: BigInt
+      - package: CryptoSwift

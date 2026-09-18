@@ -1,0 +1,11 @@
+.DS_Store
+build/
+DerivedData/
+*.xcuserdata/
+*.ipa
+*.app
+secrets.json
+sequence.json
+*.mobileprovision
+*.p12
+FMDNHub.xcodeproj/

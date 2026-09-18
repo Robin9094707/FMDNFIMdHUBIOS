@@ -26,15 +26,10 @@ enum PushRegistrationService {
     }
 
     static func register() async throws -> PushCredentials {
-        try await register(
-            identity: bootstrapIdentity()
+        let identity = try await bootstrapIdentity()
+        return try await register(
+            identity: identity
         )
-    }
-
-    private static func register(
-        identity: async throws -> PushBootstrapIdentity
-    ) async throws -> PushCredentials {
-        try await register(identity: identity())
     }
 
     static func register(

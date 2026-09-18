@@ -30,7 +30,10 @@ struct RootView: View {
 
 struct SetupView: View {
     @EnvironmentObject private var session: AppSession
+
     @State private var showImporter = false
+    @State private var showGoogleLogin = false
+    @State private var showSecurityUnlock = false
 
     var body: some View {
         NavigationStack {
@@ -48,77 +51,249 @@ struct SetupView: View {
 
                 ScrollView {
                     VStack(spacing: 24) {
-                        Spacer(minLength: 64)
+                        Spacer(minLength: 54)
 
-                        Image(systemName: "location.circle.fill")
-                            .font(.system(size: 82, weight: .semibold))
-                            .symbolRenderingMode(.hierarchical)
+                        Image(
+                            systemName:
+                                "location.circle.fill"
+                        )
+                        .font(
+                            .system(
+                                size: 82,
+                                weight: .semibold
+                            )
+                        )
+                        .symbolRenderingMode(
+                            .hierarchical
+                        )
 
                         VStack(spacing: 8) {
                             Text("Find Hub")
-                                .font(.largeTitle.bold())
+                                .font(
+                                    .largeTitle
+                                        .bold()
+                                )
 
-                            Text("Your Google trackers in a native iPhone experience.")
-                                .font(.headline)
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
+                            Text(
+                                "Sign in once and the app creates its own Find Hub secrets on this iPhone."
+                            )
+                            .font(.headline)
+                            .foregroundStyle(
+                                .secondary
+                            )
+                            .multilineTextAlignment(
+                                .center
+                            )
                         }
 
                         GlassCard {
-                            VStack(alignment: .leading, spacing: 12) {
+                            VStack(
+                                alignment: .leading,
+                                spacing: 14
+                            ) {
                                 Label(
-                                    "Private by design",
-                                    systemImage: "lock.shield.fill"
+                                    "Google sign in",
+                                    systemImage:
+                                        "person.crop.circle.badge.checkmark"
                                 )
                                 .font(.headline)
 
                                 Text(
-                                    "Import the secrets.json created by GoogleFindMyTools. "
-                                    + "Your Google password is never requested or stored by this app."
+                                    "1. Sign in on Google's EmbeddedSetup page with your normal Google account."
                                 )
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(
+                                    .secondary
+                                )
+
+                                Text(
+                                    "2. Google then asks you to unlock the Find Hub encryption domain. This can include the PIN of an Android device already linked to the account."
+                                )
+                                .foregroundStyle(
+                                    .secondary
+                                )
+
+                                Text(
+                                    "3. Find Hub creates and stores the AAS token, finder_hw shared key and owner key locally."
+                                )
+                                .foregroundStyle(
+                                    .secondary
+                                )
                             }
                         }
 
                         Button {
-                            showImporter = true
+                            Task {
+                                if await session
+                                    .prepareGeneratedSetup()
+                                {
+                                    showGoogleLogin =
+                                        true
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                if session.isBusy {
+                                    ProgressView()
+                                }
+
+                                Label(
+                                    session.isBusy
+                                        ? "Preparing…"
+                                        : "Sign in with Google",
+                                    systemImage:
+                                        "person.crop.circle.fill"
+                                )
+                            }
+                            .frame(
+                                maxWidth: .infinity
+                            )
+                            .padding(
+                                .vertical,
+                                8
+                            )
+                        }
+                        .buttonStyle(
+                            .borderedProminent
+                        )
+                        .controlSize(.large)
+                        .disabled(
+                            session.isBusy
+                        )
+
+                        GlassCard {
+                            VStack(
+                                alignment: .leading,
+                                spacing: 10
+                            ) {
+                                Label(
+                                    "Privacy",
+                                    systemImage:
+                                        "lock.shield.fill"
+                                )
+                                .font(.headline)
+
+                                Text(
+                                    "Your password and Android-device PIN are entered only into Google's pages. Find Hub does not receive those values. It stores only Google's resulting tokens and encryption keys in the iOS Keychain."
+                                )
+                                .foregroundStyle(
+                                    .secondary
+                                )
+                                .font(.subheadline)
+                            }
+                        }
+
+                        Menu {
+                            Button {
+                                showImporter = true
+                            } label: {
+                                Label(
+                                    "Import existing secrets.json",
+                                    systemImage:
+                                        "square.and.arrow.down"
+                                )
+                            }
                         } label: {
                             Label(
-                                "Import secrets.json",
-                                systemImage: "square.and.arrow.down"
+                                "Advanced / existing setup",
+                                systemImage:
+                                    "ellipsis.circle"
                             )
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
 
-                        Text(
-                            "The file needs username, aas_token, the original Android ID "
-                            + "and shared_key or owner_key."
-                        )
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
+                        Text(session.status)
+                            .font(.footnote)
+                            .foregroundStyle(
+                                .secondary
+                            )
+                            .multilineTextAlignment(
+                                .center
+                            )
                     }
                     .padding(22)
                 }
             }
             .fileImporter(
-                isPresented: $showImporter,
+                isPresented:
+                    $showImporter,
                 allowedContentTypes: [.json]
             ) { result in
-                guard case .success(let url) = result else { return }
+                guard
+                    case .success(let url) =
+                        result
+                else {
+                    return
+                }
 
-                let scoped = url.startAccessingSecurityScopedResource()
+                let scoped =
+                    url.startAccessingSecurityScopedResource()
+
                 defer {
                     if scoped {
                         url.stopAccessingSecurityScopedResource()
                     }
                 }
 
-                if let data = try? Data(contentsOf: url) {
-                    session.importSecrets(data: data)
+                if let data =
+                    try? Data(
+                        contentsOf: url
+                    )
+                {
+                    session.importSecrets(
+                        data: data
+                    )
+                }
+            }
+            .fullScreenCover(
+                isPresented:
+                    $showGoogleLogin
+            ) {
+                GoogleLoginSheet {
+                    oauthToken in
+
+                    Task {
+                        let succeeded =
+                            await session
+                                .completeEmbeddedSetup(
+                                    oauthToken:
+                                        oauthToken
+                                )
+
+                        guard succeeded else {
+                            return
+                        }
+
+                        showGoogleLogin = false
+
+                        try? await Task.sleep(
+                            for:
+                                .milliseconds(
+                                    300
+                                )
+                        )
+
+                        showSecurityUnlock =
+                            true
+                    }
+                }
+            }
+            .fullScreenCover(
+                isPresented:
+                    $showSecurityUnlock
+            ) {
+                SecurityUnlockSheet {
+                    vaultKeys in
+
+                    Task {
+                        if await session
+                            .completeSecurityUnlock(
+                                vaultKeys:
+                                    vaultKeys
+                            )
+                        {
+                            showSecurityUnlock =
+                                false
+                        }
+                    }
                 }
             }
         }

@@ -74,18 +74,95 @@ enum PushRegistrationService {
     }
 
     private static func gcmCheckin() async throws -> (androidID: String, securityToken: String) {
-        var chrome = ProtoWriter(); chrome.varint(1, 3); chrome.string(2, "94.0.4606.51"); chrome.varint(3, 1)
-        var checkin = ProtoWriter(); checkin.varint(12, 3); checkin.bytes(13, chrome.data)
-        var reqProto = ProtoWriter(); reqProto.bytes(4, checkin.data); reqProto.varint(14, 3); reqProto.varint(22, 0)
+        func payload() -> Data {
+            var chrome = ProtoWriter()
+            chrome.varint(1, 3)
+            chrome.string(2, "94.0.4606.51")
+            chrome.varint(3, 1)
 
-        var req = URLRequest(url: URL(string: "https://android.clients.google.com/checkin")!)
-        req.httpMethod = "POST"; req.httpBody = reqProto.data; req.timeoutInterval = 30
-        req.setValue("application/x-protobuf", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw FindHubError.network("GCM check-in failed") }
-        let fields = try ProtoReader.read(data)
-        guard let android = fields.first(7)?.fixed64, let sec = fields.first(8)?.fixed64 else { throw FindHubError.protobuf("GCM check-in IDs missing") }
-        return (String(android), String(sec))
+            var checkin = ProtoWriter()
+            checkin.varint(12, 3)
+            checkin.bytes(13, chrome.data)
+
+            var request = ProtoWriter()
+            request.bytes(4, checkin.data)
+            request.varint(14, 3)
+            request.varint(22, 0)
+            return request.data
+        }
+
+        var lastError = "Unknown GCM check-in error"
+
+        for attempt in 1...20 {
+            var req = URLRequest(
+                url: URL(
+                    string:
+                        "https://android.clients.google.com/checkin"
+                )!
+            )
+            req.httpMethod = "POST"
+            req.httpBody = payload()
+            req.timeoutInterval = 30
+            req.setValue(
+                "application/x-protobuf",
+                forHTTPHeaderField: "Content-Type"
+            )
+
+            do {
+                let (data, response) =
+                    try await URLSession.shared.data(
+                        for: req
+                    )
+
+                let status =
+                    (response as? HTTPURLResponse)?
+                        .statusCode
+                    ?? -1
+
+                if status == 200 {
+                    let fields =
+                        try ProtoReader.read(
+                            data
+                        )
+
+                    if let android =
+                            fields.first(7)?
+                                .fixed64,
+                       let sec =
+                            fields.first(8)?
+                                .fixed64
+                    {
+                        return (
+                            String(android),
+                            String(sec)
+                        )
+                    }
+
+                    lastError =
+                        "HTTP 200 but Android ID/security token were missing"
+                } else {
+                    lastError =
+                        "HTTP \(status): "
+                        + String(
+                            decoding: data,
+                            as: UTF8.self
+                        )
+                }
+            } catch {
+                lastError =
+                    error.localizedDescription
+            }
+
+            if attempt < 20 {
+                try await Task.sleep(
+                    for: .seconds(1)
+                )
+            }
+        }
+
+        throw FindHubError.network(
+            "GCM check-in failed after retries: \(lastError)"
+        )
     }
 
     private static func gcmRegister(
@@ -100,13 +177,13 @@ enum PushRegistrationService {
             "sender": gcmServerKey
         ])
 
-        var lastError = "Unknown GCM registration error"
+        var lastError =
+            "Unknown GCM registration error"
 
-        // Current GoogleFindMyTools treats PHONE_REGISTRATION_ERROR as
-        // transient. Google can return it for several consecutive requests
-        // before accepting the same Android/GCM identity.
-        let maxAttempts = 100
-        for attempt in 1...maxAttempts {
+        // Mirrors the working cert/SHA1 fork: keep the same
+        // Android identity, app subtype and legacy sender, and retry
+        // server Error= responses instead of rotating sender values.
+        for attempt in 1...100 {
             var req = URLRequest(
                 url: URL(
                     string:
@@ -132,6 +209,7 @@ enum PushRegistrationService {
                     try await URLSession.shared.data(
                         for: req
                     )
+
                 let text =
                     String(
                         decoding: data,
@@ -142,33 +220,76 @@ enum PushRegistrationService {
                             .whitespacesAndNewlines
                     )
 
-                if (response as? HTTPURLResponse)?
-                    .statusCode == 200,
-                   text.hasPrefix("token=")
-                {
-                    return String(
-                        text.dropFirst(6)
-                    )
+                let status =
+                    (response as? HTTPURLResponse)?
+                        .statusCode
+                    ?? -1
+
+                if status == 200 {
+                    for line in text
+                        .split(
+                            whereSeparator:
+                                \.isNewline
+                        )
+                    {
+                        let parts =
+                            line.split(
+                                separator: "=",
+                                maxSplits: 1
+                            )
+
+                        if parts.count == 2,
+                           parts[0]
+                            .lowercased()
+                            == "token"
+                        {
+                            let token =
+                                String(parts[1])
+
+                            if !token.isEmpty {
+                                return token
+                            }
+                        }
+                    }
                 }
 
-                lastError = text.isEmpty
-                    ? "HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)"
+                lastError =
+                    text.isEmpty
+                    ? "HTTP \(status)"
                     : text
 
-                let isPhoneRegistrationError =
-                    text.uppercased().contains(
-                        "PHONE_REGISTRATION_ERROR"
-                    )
+                let isStructuredError =
+                    text
+                        .split(
+                            whereSeparator:
+                                \.isNewline
+                        )
+                        .contains {
+                            $0
+                                .lowercased()
+                                .hasPrefix(
+                                    "error="
+                                )
+                        }
 
-                guard isPhoneRegistrationError,
-                      attempt < maxAttempts else {
+                // The reference implementation retries every Error=...
+                // response with the same identity/sender. Network/5xx
+                // responses are also safe to retry here.
+                let retryable =
+                    isStructuredError
+                    || status >= 500
+                    || status == -1
+
+                guard retryable,
+                      attempt < 100
+                else {
                     break
                 }
             } catch {
                 lastError =
                     error.localizedDescription
 
-                guard attempt < maxAttempts else {
+                guard attempt < 100 else {
                     break
                 }
             }

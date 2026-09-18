@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import CryptoKit
 import CoreLocation
 
 // MARK: - Models
@@ -159,6 +160,27 @@ enum SecretsImporter {
         if let shared = secrets.sharedKeyHex { root["shared_key"] = shared }
         if let owner = secrets.ownerKeyHex { root["owner_key"] = owner }
         if let push {
+            let privateKey =
+                try P256.KeyAgreement.PrivateKey(
+                    rawRepresentation:
+                        push.privateKeyRaw
+                )
+
+            func urlSafePadded(
+                _ data: Data
+            ) -> String {
+                data.base64EncodedString()
+                    .replacingOccurrences(
+                        of: "+",
+                        with: "-"
+                    )
+                    .replacingOccurrences(
+                        of: "/",
+                        with: "_"
+                    )
+            }
+
+            // Native iOS copy used by this app.
             root["ios_fcm_credentials"] = [
                 "android_id": push.androidID,
                 "security_token": push.securityToken,
@@ -169,6 +191,59 @@ enum SecretsImporter {
                 "private_key_raw": push.privateKeyRaw.base64EncodedString(),
                 "public_key_x963": push.publicKeyX963.base64EncodedString(),
                 "auth_secret": push.authSecret.base64EncodedString()
+            ]
+
+            // Also emit the original GoogleFindMyTools credential shape.
+            // This makes a secrets.json generated on the iPhone reusable
+            // by the Python tool/forks instead of being iOS-only.
+            root["fcm_credentials"] = [
+                "keys": [
+                    "public":
+                        urlSafePadded(
+                            push.publicKeyX963
+                        ),
+                    "private":
+                        urlSafePadded(
+                            privateKey
+                                .derRepresentation
+                        ),
+                    "secret":
+                        urlSafePadded(
+                            push.authSecret
+                        )
+                ],
+                "gcm": [
+                    "token":
+                        push.gcmToken,
+                    "app_id":
+                        push.gcmAppID,
+                    "android_id":
+                        push.androidID,
+                    "security_token":
+                        push.securityToken
+                ],
+                "fcm": [
+                    "registration": [
+                        "token":
+                            push.registrationToken
+                    ],
+                    "installation": [
+                        "token":
+                            push.installationToken,
+                        "refresh_token":
+                            push.installationRefreshToken,
+                        "fid":
+                            push.fid
+                    ]
+                ],
+                "config": [
+                    "bundle_id":
+                        "com.google.android.apps.adm",
+                    "project_id":
+                        "google.com:api-project-289722593072",
+                    "vapid_key":
+                        "BDOU99-h67HcA6JeFXHbSNMu7e2yNNu3RzoMj8TM4W88jITfq7ZmPvIM1Iv-4_l2LxQcYwhqby2xGpWwzjfAnG4"
+                ]
             ]
         }
         return try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])

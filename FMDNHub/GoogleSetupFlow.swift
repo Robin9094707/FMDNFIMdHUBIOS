@@ -476,21 +476,88 @@ struct SecurityUnlockWebView: UIViewRepresentable {
                 return
             }
 
-            let host = url.host?.lowercased() ?? ""
+            let host =
+                url.host?.lowercased()
+                ?? ""
 
-            // The reference implementation waits for myaccount.google.com.
-            // Some Google sessions stay on accounts.google.com with an
-            // authenticated account chooser; in that case we only proceed
-            // after a completed accounts navigation that is not a login form.
             if host == "myaccount.google.com" {
-                openedUnlock = true
-                log(
-                    "Google account session confirmed; opening finder_hw unlock (kdi length: \(SecurityDomainUnlock.kdiLength()))"
+                openUnlock(
+                    reason:
+                        "myaccount session confirmed"
                 )
-                webView?.load(
-                    URLRequest(url: unlockURL)
-                )
+                return
             }
+
+            guard host == "accounts.google.com",
+                  let webView else {
+                return
+            }
+
+            // WKWebView can keep an authenticated Google session on
+            // accounts.google.com instead of redirecting to myaccount.
+            // We do not inspect field values. We only detect whether a
+            // login/password input is currently present.
+            let script = """
+            (() => {
+              return Boolean(
+                document.querySelector(
+                  'input[type="email"], input[type="password"], input[name="identifier"]'
+                )
+              );
+            })();
+            """
+
+            webView.evaluateJavaScript(
+                script
+            ) { [weak self] result, error in
+                guard let self,
+                      !self.openedUnlock
+                else {
+                    return
+                }
+
+                if let error {
+                    self.log(
+                        "Google session probe failed: \(error.localizedDescription)"
+                    )
+                    return
+                }
+
+                let hasLoginInput =
+                    (result as? Bool)
+                    ?? true
+
+                if !hasLoginInput {
+                    self.openUnlock(
+                        reason:
+                            "authenticated accounts session confirmed"
+                    )
+                } else {
+                    self.log(
+                        "Google account page is waiting for sign-in"
+                    )
+                }
+            }
+        }
+
+        private func openUnlock(
+            reason: String
+        ) {
+            guard !openedUnlock else {
+                return
+            }
+
+            openedUnlock = true
+
+            log(
+                "Google \(reason); opening finder_hw unlock (kdi length: \(SecurityDomainUnlock.kdiLength()))"
+            )
+
+            webView?.load(
+                URLRequest(
+                    url: unlockURL
+                )
+            )
         }
 
         func webView(

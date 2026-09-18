@@ -179,7 +179,7 @@ enum TrackerCrypto {
     private static func dbl(_ input: [UInt8]) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: 16), carry: UInt8 = 0
         for i in stride(from: 15, through: 0, by: -1) {
-            let nextCarry = (input[i] & 0x80) == 0 ? 0 : 1
+            let nextCarry: UInt8 = (input[i] & 0x80) == 0 ? 0 : 1
             out[i] = (input[i] << 1) | carry
             carry = nextCarry
         }

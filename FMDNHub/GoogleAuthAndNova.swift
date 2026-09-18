@@ -107,9 +107,148 @@ enum AndroidAuthService {
     }
 }
 
-private final class HTTPAccumulator: @unchecked Sendable {
-    var data = Data()
-    var finished = false
+private final class HTTP1RequestOperation: @unchecked Sendable {
+    private let host: String
+    private let path: String
+    private let headers: [String: String]
+    private let body: Data
+    private let continuation: CheckedContinuation<Data, Error>
+    private let connection: NWConnection
+    private let queue: DispatchQueue
+
+    private var responseData = Data()
+    private var finished = false
+
+    init(
+        host: String,
+        path: String,
+        headers: [String: String],
+        body: Data,
+        continuation: CheckedContinuation<Data, Error>
+    ) {
+        self.host = host
+        self.path = path
+        self.headers = headers
+        self.body = body
+        self.continuation = continuation
+
+        let tls = NWProtocolTLS.Options()
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        self.connection = NWConnection(
+            host: NWEndpoint.Host(host),
+            port: 443,
+            using: NWParameters(tls: tls, tcp: tcp)
+        )
+        self.queue = DispatchQueue(
+            label: "FindHub.HTTP1.\(UUID().uuidString)"
+        )
+    }
+
+    func start() {
+        connection.stateUpdateHandler = { [self] state in
+            handle(state)
+        }
+        connection.start(queue: queue)
+    }
+
+    private func handle(_ state: NWConnection.State) {
+        switch state {
+        case .ready:
+            sendRequest()
+
+        case .failed(let error):
+            finish(.failure(error))
+
+        case .cancelled:
+            if !finished {
+                finish(
+                    .failure(
+                        FindHubError.network(
+                            "Connection cancelled"
+                        )
+                    )
+                )
+            }
+
+        default:
+            break
+        }
+    }
+
+    private func sendRequest() {
+        var request =
+            "POST \(path) HTTP/1.1\r\n"
+            + "Host: \(host)\r\n"
+            + "Connection: close\r\n"
+            + "Content-Length: \(body.count)\r\n"
+
+        for (key, value) in headers {
+            request += "\(key): \(value)\r\n"
+        }
+
+        request += "\r\n"
+
+        var packet = Data(request.utf8)
+        packet.append(body)
+
+        connection.send(
+            content: packet,
+            completion: .contentProcessed { [self] error in
+                if let error {
+                    finish(.failure(error))
+                }
+            }
+        )
+
+        receive()
+    }
+
+    private func receive() {
+        connection.receive(
+            minimumIncompleteLength: 1,
+            maximumLength: 64 * 1024
+        ) { [self] content, _, isComplete, error in
+            if let content {
+                responseData.append(content)
+            }
+
+            if let error {
+                finish(.failure(error))
+                return
+            }
+
+            if isComplete {
+                do {
+                    finish(
+                        .success(
+                            try HTTP1TLSClient.parseHTTPResponse(
+                                responseData
+                            )
+                        )
+                    )
+                } catch {
+                    finish(.failure(error))
+                }
+                return
+            }
+
+            receive()
+        }
+    }
+
+    private func finish(
+        _ result: Result<Data, Error>
+    ) {
+        guard !finished else {
+            return
+        }
+
+        finished = true
+        connection.stateUpdateHandler = nil
+        connection.cancel()
+        continuation.resume(with: result)
+    }
 }
 
 private enum HTTP1TLSClient {
@@ -120,131 +259,23 @@ private enum HTTP1TLSClient {
         body: Data
     ) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
-            let tls = NWProtocolTLS.Options()
-            let tcp = NWProtocolTCP.Options()
-            tcp.noDelay = true
-
-            let parameters = NWParameters(
-                tls: tls,
-                tcp: tcp
+            let operation = HTTP1RequestOperation(
+                host: host,
+                path: path,
+                headers: headers,
+                body: body,
+                continuation: continuation
             )
-
-            let connection = NWConnection(
-                host: NWEndpoint.Host(host),
-                port: 443,
-                using: parameters
-            )
-
-            let queue = DispatchQueue(
-                label: "FindHub.HTTP1.\(UUID().uuidString)"
-            )
-
-            let state = HTTPAccumulator()
-
-            func finish(
-                _ result: Result<Data, Error>
-            ) {
-                guard !state.finished else {
-                    return
-                }
-
-                state.finished = true
-                connection.cancel()
-                continuation.resume(with: result)
-            }
-
-            func receive() {
-                connection.receive(
-                    minimumIncompleteLength: 1,
-                    maximumLength: 64 * 1024
-                ) { content, _, isComplete, error in
-                    if let content {
-                        state.data.append(content)
-                    }
-
-                    if let error {
-                        finish(.failure(error))
-                        return
-                    }
-
-                    if isComplete {
-                        do {
-                            finish(
-                                .success(
-                                    try parseHTTPResponse(
-                                        state.data
-                                    )
-                                )
-                            )
-                        } catch {
-                            finish(.failure(error))
-                        }
-                        return
-                    }
-
-                    receive()
-                }
-            }
-
-            connection.stateUpdateHandler = { newState in
-                switch newState {
-                case .ready:
-                    var request =
-                        "POST \(path) HTTP/1.1\r\n"
-                        + "Host: \(host)\r\n"
-                        + "Connection: close\r\n"
-                        + "Content-Length: \(body.count)\r\n"
-
-                    for (key, value) in headers {
-                        request +=
-                            "\(key): \(value)\r\n"
-                    }
-
-                    request += "\r\n"
-
-                    var packet = Data(request.utf8)
-                    packet.append(body)
-
-                    connection.send(
-                        content: packet,
-                        completion: .contentProcessed {
-                            error in
-                            if let error {
-                                finish(.failure(error))
-                            }
-                        }
-                    )
-
-                    receive()
-
-                case .failed(let error):
-                    finish(.failure(error))
-
-                case .cancelled:
-                    if !state.finished {
-                        finish(
-                            .failure(
-                                FindHubError.network(
-                                    "Connection cancelled"
-                                )
-                            )
-                        )
-                    }
-
-                default:
-                    break
-                }
-            }
-
-            connection.start(queue: queue)
+            operation.start()
         }
     }
 
-    private static func parseHTTPResponse(
+    fileprivate static func parseHTTPResponse(
         _ data: Data
     ) throws -> Data {
-        guard let marker =
-                data.range(of: Data("\r\n\r\n".utf8)) else {
+        guard let marker = data.range(
+            of: Data("\r\n\r\n".utf8)
+        ) else {
             throw FindHubError.network(
                 "Malformed HTTP response"
             )
@@ -263,8 +294,8 @@ private enum HTTP1TLSClient {
         guard
             let statusLine =
                 headerText
-                    .split(
-                        separator: "\r\n"
+                    .components(
+                        separatedBy: "\r\n"
                     )
                     .first,
             let status = Int(
@@ -302,9 +333,9 @@ private enum HTTP1TLSClient {
         var output = Data()
 
         while !input.isEmpty {
-            guard let range =
-                    input.range(of: Data("\r\n".utf8))
-            else {
+            guard let range = input.range(
+                of: Data("\r\n".utf8)
+            ) else {
                 break
             }
 

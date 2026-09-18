@@ -74,6 +74,84 @@ enum AndroidAuthService {
         )
     }
 
+    static func exchangeEmbeddedSetupToken(
+        _ webToken: String,
+        androidID: String
+    ) async throws -> (email: String, aasToken: String) {
+        let form: [String: String] = [
+            "accountType": "HOSTED_OR_GOOGLE",
+            "Email": "",
+            "has_permission": "1",
+            "add_account": "1",
+            "ACCESS_TOKEN": "1",
+            "Token": webToken,
+            "service": "ac2dm",
+            "source": "android",
+            "androidId": androidID,
+            "device_country": "us",
+            "operatorCountry": "us",
+            "lang": "en",
+            "sdk_version": "17",
+            "google_play_services_version": "240913000",
+            "client_sig": clientSignature,
+            "callerSig": clientSignature,
+            "droidguard_results": "dummy123"
+        ]
+
+        let raw = try await HTTP1TLSClient.post(
+            host: "android.clients.google.com",
+            path: "/auth",
+            headers: [
+                "User-Agent": "GoogleAuth/1.4",
+                "Accept-Encoding": "identity",
+                "Content-Type": "application/x-www-form-urlencoded"
+            ],
+            body: formEncoded(form)
+        )
+
+        let response = parseAuthResponse(raw)
+
+        guard let aasToken = response["Token"],
+              !aasToken.isEmpty else {
+            throw FindHubError.auth(
+                response["Error"]
+                ?? response["error"]
+                ?? String(decoding: raw, as: UTF8.self)
+            )
+        }
+
+        guard let email = response["Email"],
+              !email.isEmpty else {
+            throw FindHubError.auth(
+                "Google accepted the login but did not return the account email."
+            )
+        }
+
+        return (email, aasToken)
+    }
+
+    private static func parseAuthResponse(
+        _ data: Data
+    ) -> [String: String] {
+        let text = String(decoding: data, as: UTF8.self)
+        var response: [String: String] = [:]
+
+        for line in text.split(separator: "\n") {
+            let parts = line
+                .split(
+                    separator: "=",
+                    maxSplits: 1
+                )
+                .map(String.init)
+
+            if parts.count == 2 {
+                response[parts[0]] = parts[1]
+            }
+        }
+
+        return response
+    }
+
     private static func formEncoded(
         _ dictionary: [String: String]
     ) -> Data {

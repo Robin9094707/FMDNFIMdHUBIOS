@@ -10,6 +10,7 @@ final class AppSession: ObservableObject {
     @Published var errorMessage: String?
 
     private var pushCredentials: PushCredentials?
+    private var pendingGeneratedSecrets: ImportedSecrets?
     private var sequence: SequenceState
     private var customNames: [String: String] = [:]
     private var hiddenIDs: Set<String> = []
@@ -31,6 +32,149 @@ final class AppSession: ObservableObject {
 
     var hiddenDevices: [TrackerDevice] {
         devices.filter { hiddenIDs.contains($0.id) }
+    }
+
+    func prepareGeneratedSetup() async -> Bool {
+        isBusy = true
+        status = "Preparing secure Google sign in…"
+        defer { isBusy = false }
+
+        do {
+            if pushCredentials == nil {
+                let created =
+                    try await PushRegistrationService
+                        .register()
+                pushCredentials = created
+                try SecureStore.save(
+                    created,
+                    key: "push"
+                )
+            }
+
+            status = "Continue with Google"
+            return true
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
+    func completeEmbeddedSetup(
+        oauthToken: String
+    ) async -> Bool {
+        guard let pushCredentials else {
+            present(
+                FindHubError.notReady(
+                    "The secure push identity is not ready."
+                )
+            )
+            return false
+        }
+
+        isBusy = true
+        status = "Connecting your Google account…"
+        defer { isBusy = false }
+
+        do {
+            let result =
+                try await AndroidAuthService
+                    .exchangeEmbeddedSetupToken(
+                        oauthToken,
+                        androidID:
+                            pushCredentials
+                                .androidID
+                    )
+
+            pendingGeneratedSecrets =
+                ImportedSecrets(
+                    username: result.email,
+                    aasToken: result.aasToken,
+                    authAndroidID:
+                        pushCredentials
+                            .androidID,
+                    sharedKeyHex: nil,
+                    ownerKeyHex: nil
+                )
+
+            status =
+                "Google connected. Unlock Find Hub encryption."
+            return true
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
+    func completeSecurityUnlock(
+        vaultKeys: String
+    ) async -> Bool {
+        guard var generated =
+                pendingGeneratedSecrets
+        else {
+            present(
+                FindHubError.notReady(
+                    "Google sign in must be completed first."
+                )
+            )
+            return false
+        }
+
+        isBusy = true
+        status = "Saving Find Hub encryption keys…"
+        defer { isBusy = false }
+
+        do {
+            let vault =
+                try SecurityDomainUnlock
+                    .parseFinderHWKey(
+                        vaultKeys
+                    )
+
+            generated.sharedKeyHex =
+                vault.key.hex
+
+            // Store the shared key first. Owner-key retrieval uses it
+            // and can be retried later if Google temporarily rejects Spot.
+            try SecureStore.save(
+                generated,
+                key: "secrets"
+            )
+
+            do {
+                let owner =
+                    try await SpotService
+                        .ownerKey(
+                            secrets:
+                                generated
+                        )
+                generated.ownerKeyHex =
+                    owner.0.hex
+            } catch {
+                // A valid shared finder_hw key is sufficient to retry
+                // owner-key retrieval during the first Locate request.
+            }
+
+            secrets = generated
+            pendingGeneratedSecrets = nil
+
+            try SecureStore.save(
+                generated,
+                key: "secrets"
+            )
+
+            try writeGeneratedSecretsFile(
+                generated
+            )
+
+            status =
+                "Find Hub account ready"
+
+            await refreshDevices()
+            return true
+        } catch {
+            present(error)
+            return false
+        }
     }
 
     func importSecrets(data: Data) {
@@ -237,6 +381,8 @@ final class AppSession: ObservableObject {
         devices = []
         SecureStore.delete("secrets")
         SecureStore.delete("push")
+        pendingGeneratedSecrets = nil
+        removeGeneratedSecretsFile()
         status = "Signed out locally"
     }
 

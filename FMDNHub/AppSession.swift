@@ -10,6 +10,7 @@ final class AppSession: ObservableObject {
     @Published var errorMessage: String?
 
     private var pushCredentials: PushCredentials?
+    private var pushBootstrap: PushBootstrapIdentity?
     private var pendingGeneratedSecrets: ImportedSecrets?
     private var sequence: SequenceState
     private var customNames: [String: String] = [:]
@@ -19,6 +20,7 @@ final class AppSession: ObservableObject {
     init() {
         secrets = SecureStore.load(ImportedSecrets.self, key: "secrets")
         pushCredentials = SecureStore.load(PushCredentials.self, key: "push")
+        pushBootstrap = SecureStore.load(PushBootstrapIdentity.self, key: "push_bootstrap")
         sequence = SecureStore.load(SequenceState.self, key: "sequence") ?? SequenceState()
         loadPreferences()
         if secrets != nil {
@@ -36,18 +38,21 @@ final class AppSession: ObservableObject {
 
     func prepareGeneratedSetup() async -> Bool {
         isBusy = true
-        status = "Preparing secure Google sign in…"
+        status = "Preparing Google sign in…"
         defer { isBusy = false }
 
         do {
-            if pushCredentials == nil {
-                let created =
+            if pushCredentials == nil,
+               pushBootstrap == nil {
+                let identity =
                     try await PushRegistrationService
-                        .register()
-                pushCredentials = created
+                        .bootstrapIdentity()
+
+                pushBootstrap = identity
+
                 try SecureStore.save(
-                    created,
-                    key: "push"
+                    identity,
+                    key: "push_bootstrap"
                 )
             }
 
@@ -62,10 +67,13 @@ final class AppSession: ObservableObject {
     func completeEmbeddedSetup(
         oauthToken: String
     ) async -> Bool {
-        guard let pushCredentials else {
+        guard let androidID =
+                pushCredentials?.androidID
+                ?? pushBootstrap?.androidID
+        else {
             present(
                 FindHubError.notReady(
-                    "The secure push identity is not ready."
+                    "The Google bootstrap identity is not ready."
                 )
             )
             return false
@@ -80,18 +88,14 @@ final class AppSession: ObservableObject {
                 try await AndroidAuthService
                     .exchangeEmbeddedSetupToken(
                         oauthToken,
-                        androidID:
-                            pushCredentials
-                                .androidID
+                        androidID: androidID
                     )
 
             pendingGeneratedSecrets =
                 ImportedSecrets(
                     username: result.email,
                     aasToken: result.aasToken,
-                    authAndroidID:
-                        pushCredentials
-                            .androidID,
+                    authAndroidID: androidID,
                     sharedKeyHex: nil,
                     ownerKeyHex: nil
                 )
@@ -269,9 +273,35 @@ final class AppSession: ObservableObject {
         do {
             if pushCredentials == nil {
                 status = "Registering secure push channel…"
-                let created = try await PushRegistrationService.register()
+
+                let identity: PushBootstrapIdentity
+
+                if let existing = pushBootstrap {
+                    identity = existing
+                } else {
+                    let created =
+                        try await PushRegistrationService
+                            .bootstrapIdentity()
+                    pushBootstrap = created
+                    try SecureStore.save(
+                        created,
+                        key: "push_bootstrap"
+                    )
+                    identity = created
+                }
+
+                let created =
+                    try await PushRegistrationService
+                        .register(
+                            identity: identity
+                        )
+
                 pushCredentials = created
-                try SecureStore.save(created, key: "push")
+
+                try SecureStore.save(
+                    created,
+                    key: "push"
+                )
             }
 
             guard let pushCredentials else {
@@ -371,16 +401,20 @@ final class AppSession: ObservableObject {
 
     func resetPushIdentity() {
         pushCredentials = nil
+        pushBootstrap = nil
         SecureStore.delete("push")
+        SecureStore.delete("push_bootstrap")
         status = "Push identity reset"
     }
 
     func signOut() {
         secrets = nil
         pushCredentials = nil
+        pushBootstrap = nil
         devices = []
         SecureStore.delete("secrets")
         SecureStore.delete("push")
+        SecureStore.delete("push_bootstrap")
         pendingGeneratedSecrets = nil
         removeGeneratedSecretsFile()
         status = "Signed out locally"

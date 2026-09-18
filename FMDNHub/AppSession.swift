@@ -39,14 +39,63 @@ final class AppSession: ObservableObject {
             ?? pushBootstrap?.androidID
     }
 
+    var pushChannelStatus: String {
+        if pushCredentials != nil {
+            return "Registered"
+        }
+        if pushBootstrap != nil {
+            return "Identity ready"
+        }
+        return "Not prepared"
+    }
+
+
     var hiddenDevices: [TrackerDevice] {
         devices.filter { hiddenIDs.contains($0.id) }
     }
 
     func prepareGeneratedSetup() async -> Bool {
-        debug("Opening Google EmbeddedSetup")
-        status = "Continue with Google"
-        return true
+        if pushCredentials != nil
+            || pushBootstrap != nil
+        {
+            debug(
+                "Reusing existing Google bootstrap identity"
+            )
+            status = "Continue with Google"
+            return true
+        }
+
+        isBusy = true
+        status =
+            "Preparing secure Google device identity…"
+        debug(
+            "Creating GCM check-in identity before EmbeddedSetup"
+        )
+        defer {
+            isBusy = false
+        }
+
+        do {
+            let identity =
+                try await PushRegistrationService
+                    .bootstrapIdentity()
+
+            pushBootstrap = identity
+
+            try SecureStore.save(
+                identity,
+                key: "push_bootstrap"
+            )
+
+            debug(
+                "Google bootstrap identity ready"
+            )
+            status = "Continue with Google"
+            return true
+        } catch {
+            present(error)
+            return false
+        }
     }
 
     func completeEmbeddedSetup(
@@ -184,6 +233,34 @@ final class AppSession: ObservableObject {
             debug("Generated secrets saved locally")
 
             await refreshDevices()
+
+            Task {
+                do {
+                    _ = try await
+                        self.ensurePushCredentials()
+
+                    if self.status
+                        .hasPrefix("Error")
+                    {
+                        return
+                    }
+
+                    self.status =
+                        "Find Hub ready"
+                } catch {
+                    self.debug(
+                        "Background push registration deferred: \(error.localizedDescription)"
+                    )
+
+                    if self.status
+                        != "Error"
+                    {
+                        self.status =
+                            "Trackers ready • push setup will retry when locating"
+                    }
+                }
+            }
+
             return true
         } catch {
             present(error)
@@ -272,6 +349,97 @@ final class AppSession: ObservableObject {
         }
     }
 
+    func testPushConnection() async {
+        isBusy = true
+        status = "Testing secure push channel…"
+        debug("Manual push-channel test started")
+        defer { isBusy = false }
+
+        do {
+            let credentials =
+                try await ensurePushCredentials()
+
+            status =
+                "Connecting to Google push…"
+
+            let client =
+                MCSClient(
+                    credentials:
+                        credentials
+                )
+
+            try await client.connect()
+            client.close()
+
+            status =
+                "Push channel ready"
+            debug(
+                "Push-channel test succeeded"
+            )
+        } catch {
+            present(error)
+        }
+    }
+
+    private func ensurePushCredentials()
+        async throws -> PushCredentials
+    {
+        if let pushCredentials {
+            return pushCredentials
+        }
+
+        status =
+            "Registering secure push channel…"
+
+        let identity: PushBootstrapIdentity
+
+        if let existing = pushBootstrap {
+            identity = existing
+        } else {
+            let created =
+                try await PushRegistrationService
+                    .bootstrapIdentity()
+
+            pushBootstrap = created
+
+            try SecureStore.save(
+                created,
+                key: "push_bootstrap"
+            )
+
+            identity = created
+        }
+
+        debug(
+            "Starting full GCM/FCM registration"
+        )
+
+        let created =
+            try await PushRegistrationService
+                .register(
+                    identity: identity
+                )
+
+        pushCredentials = created
+
+        try SecureStore.save(
+            created,
+            key: "push"
+        )
+
+        if let current = secrets {
+            try? writeGeneratedSecretsFile(
+                current
+            )
+        }
+
+        debug(
+            "Full GCM/FCM registration succeeded"
+        )
+
+        return created
+    }
+
     func locate(_ device: TrackerDevice) async {
         guard var secrets else { return }
         isBusy = true
@@ -281,42 +449,8 @@ final class AppSession: ObservableObject {
         var mcs: MCSClient?
 
         do {
-            if pushCredentials == nil {
-                status = "Registering secure push channel…"
-
-                let identity: PushBootstrapIdentity
-
-                if let existing = pushBootstrap {
-                    identity = existing
-                } else {
-                    let created =
-                        try await PushRegistrationService
-                            .bootstrapIdentity()
-                    pushBootstrap = created
-                    try SecureStore.save(
-                        created,
-                        key: "push_bootstrap"
-                    )
-                    identity = created
-                }
-
-                let created =
-                    try await PushRegistrationService
-                        .register(
-                            identity: identity
-                        )
-
-                pushCredentials = created
-
-                try SecureStore.save(
-                    created,
-                    key: "push"
-                )
-            }
-
-            guard let pushCredentials else {
-                throw FindHubError.notReady("Push registration unavailable")
-            }
+            let pushCredentials =
+                try await ensurePushCredentials()
 
             status = "Connecting to Find Hub…"
             let client = MCSClient(credentials: pushCredentials)

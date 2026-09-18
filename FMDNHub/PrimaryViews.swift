@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import UIKit
 
 struct RootView: View {
     @EnvironmentObject private var session: AppSession
@@ -34,6 +35,7 @@ struct SetupView: View {
     @State private var showImporter = false
     @State private var showGoogleLogin = false
     @State private var showSecurityUnlock = false
+    @State private var showDebugLog = false
 
     var body: some View {
         NavigationStack {
@@ -192,6 +194,16 @@ struct SetupView: View {
                                         "square.and.arrow.down"
                                 )
                             }
+
+                            Button {
+                                showDebugLog = true
+                            } label: {
+                                Label(
+                                    "Setup debug log",
+                                    systemImage:
+                                        "ladybug"
+                                )
+                            }
                         } label: {
                             Label(
                                 "Advanced / existing setup",
@@ -280,21 +292,150 @@ struct SetupView: View {
                 isPresented:
                     $showSecurityUnlock
             ) {
-                SecurityUnlockSheet {
-                    vaultKeys in
+                SecurityUnlockSheet(
+                    onVaultKeys: {
+                        vaultKeys in
 
-                    Task {
-                        if await session
-                            .completeSecurityUnlock(
-                                vaultKeys:
-                                    vaultKeys
+                        Task {
+                            if await session
+                                .completeSecurityUnlock(
+                                    vaultKeys:
+                                        vaultKeys
+                                )
+                            {
+                                showSecurityUnlock =
+                                    false
+                            }
+                        }
+                    },
+                    onDebug: {
+                        message in
+                        session.debug(message)
+                    }
+                )
+            }
+            .sheet(
+                isPresented:
+                    $showDebugLog
+            ) {
+                SetupDebugLogView()
+                    .environmentObject(
+                        session
+                    )
+            }
+        }
+    }
+}
+
+struct SetupDebugLogView: View {
+    @EnvironmentObject private var session: AppSession
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if session.debugEvents.isEmpty {
+                    ContentUnavailableView(
+                        "No debug entries",
+                        systemImage:
+                            "ladybug",
+                        description:
+                            Text(
+                                "Run the Google setup once and the safe diagnostic events will appear here."
                             )
-                        {
-                            showSecurityUnlock =
-                                false
+                    )
+                } else {
+                    List {
+                        ForEach(
+                            Array(
+                                session.debugEvents
+                                    .enumerated()
+                            ),
+                            id: \.offset
+                        ) { _, entry in
+                            Text(entry)
+                                .font(
+                                    .system(
+                                        .caption,
+                                        design:
+                                            .monospaced
+                                    )
+                                )
+                                .textSelection(
+                                    .enabled
+                                )
                         }
                     }
                 }
+            }
+            .navigationTitle(
+                "Setup Debug"
+            )
+            .navigationBarTitleDisplayMode(
+                .inline
+            )
+            .toolbar {
+                ToolbarItem(
+                    placement:
+                        .topBarLeading
+                ) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+
+                ToolbarItemGroup(
+                    placement:
+                        .topBarTrailing
+                ) {
+                    Button {
+                        UIPasteboard.general.string =
+                            session.debugEvents
+                                .joined(
+                                    separator:
+                                        "\n"
+                                )
+                    } label: {
+                        Image(
+                            systemName:
+                                "doc.on.doc"
+                        )
+                    }
+                    .disabled(
+                        session.debugEvents
+                            .isEmpty
+                    )
+
+                    Button(
+                        role: .destructive
+                    ) {
+                        session.clearDebugLog()
+                    } label: {
+                        Image(
+                            systemName:
+                                "trash"
+                        )
+                    }
+                }
+            }
+            .safeAreaInset(
+                edge: .bottom
+            ) {
+                Text(
+                    "Passwords, PINs, OAuth tokens and encryption keys are intentionally not written to this log."
+                )
+                .font(.caption2)
+                .foregroundStyle(
+                    .secondary
+                )
+                .padding(10)
+                .frame(
+                    maxWidth:
+                        .infinity
+                )
+                .background(
+                    .ultraThinMaterial
+                )
             }
         }
     }

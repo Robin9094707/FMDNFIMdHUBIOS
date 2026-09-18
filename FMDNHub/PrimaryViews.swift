@@ -273,10 +273,18 @@ struct SetupView: View {
                 isPresented:
                     $showGoogleLogin
             ) {
-                GoogleLoginSheet {
-                    oauthToken in
+                GoogleLoginSheet(
+                    androidID:
+                        session.googleSetupAndroidID
+                        ?? "",
+                    onDebug: {
+                        message in
+                        session.debug(message)
+                    },
+                    onToken: {
+                        oauthToken in
 
-                    Task {
+                        Task {
                         let succeeded =
                             await session
                                 .completeEmbeddedSetup(
@@ -299,8 +307,9 @@ struct SetupView: View {
 
                         showSecurityUnlock =
                             true
+                        }
                     }
-                }
+                )
             }
             .fullScreenCover(
                 isPresented:
